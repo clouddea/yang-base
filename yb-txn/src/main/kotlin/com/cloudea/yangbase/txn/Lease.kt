@@ -1,0 +1,206 @@
+package com.cloudea.yangbase.txn
+
+import com.cloudea.yangbase.common.ConcurrentModificationException
+import com.cloudea.yangbase.common.Epoch
+import com.cloudea.yangbase.common.ObjectNotFoundException
+import com.cloudea.yangbase.common.PreconditionFailedException
+import com.cloudea.yangbase.common.ShardId
+import com.cloudea.yangbase.common.SqlException
+import com.cloudea.yangbase.common.MySqlErrors
+import com.cloudea.yangbase.common.metrics.Metrics
+import com.cloudea.yangbase.objectstore.ObjectKeys
+import com.cloudea.yangbase.objectstore.ObjectStore
+import com.cloudea.yangbase.objectstore.Precondition
+import kotlinx.coroutines.delay
+
+/**
+ * 分片写者租约（设计文档 §4.3）。
+ *
+ * ## 为什么必须有它
+ *
+ * 这个系统的写者身份**不是节点属性，而是一份租约**（原则 P5）。没有租约时：
+ *  - 两个 CN 可以同时打开同一个分片，各自以为自己是写者；
+ *  - 它们会往**同一个 WAL 前缀**下写对象，谁的 manifest 条件写成功谁就"赢"，
+ *    但输的那一方写下的 WAL 对象仍然躺在那里，等下一个恢复者把它们重放进去——
+ *    **数据错乱，而且没有任何一方报错**；
+ *  - `wal/e{epoch}/` 里的 epoch 永远等于 1，那道"旧写者天然被忽略"的防线
+ *    从未真正生效过。
+ *
+ * ## 放在对象存储上，而不是一个常驻服务里
+ *
+ * 设计文档 §4.7 的 Q2 决策要求**两种协调模式都实现**。这里是
+ * `ObjectStoreCoordination` 那一种：用 `If-None-Match` / `If-Match` 的 CAS
+ * 在对象存储上做选举与授时，**零新增基础设施**。
+ *
+ * 这个选择不是权宜之计：本系统存在的理由就是「没有客户的时候不要付固定费用」，
+ * 为一个低频数据库常驻三个 Raft 节点恰恰是它想消灭的成本。
+ * 代价是租约操作有对象存储的 RTT（几十毫秒），而租约只在**分片打开**与
+ * **周期续期**时用到，不在每次写入的关键路径上。
+ *
+ * ## epoch 永不重置（这条是正确性的关键）
+ *
+ * 租约对象**从不被删除**，释放只是把 holder 清空并让 TTL 到期。
+ * 因为 epoch 一旦被回收重用，一个旧写者当年写在 `wal/e{3}/` 下的对象
+ * 就会被新写者当成自己的日志重放进去——那是静默的数据损坏。
+ * 宁可让对象多留一个字段，也不让 epoch 回退。
+ */
+class LeaseManager(
+    private val store: ObjectStore,
+    /** 本节点的标识。写进租约，用于诊断「谁占着」。 */
+    val holder: String,
+    /** 租约时长。必须**显著大于**分片恢复时间（设计文档 §6.8 估算是 3–5s）。 */
+    val ttlMillis: Long = 15_000,
+) : com.cloudea.yangbase.storage.LeaseProvider {
+
+    /**
+     * 一份租约。`epoch` 单调递增，永不重置。
+     *
+     * 实现 [com.cloudea.yangbase.storage.ShardLease] —— 存储层只认那个接口，
+     * 不知道协调是通过对象存储 CAS 还是 Raft 做的（§4.7 的两种模式）。
+     */
+    data class Lease(
+        val shard: ShardId,
+        override val holder: String,
+        override val epoch: Long,
+        val expiresAtMillis: Long,
+        /** CAS 凭据。续期与释放都要带上它。 */
+        val etag: String,
+    ) : com.cloudea.yangbase.storage.ShardLease {
+        override fun isExpired(now: Long): Boolean = now >= expiresAtMillis
+
+        /** 距离过期还有多久。用于决定何时续期。 */
+        override fun remainingMillis(now: Long): Long = expiresAtMillis - now
+    }
+
+    private fun keyOf(shard: ShardId) = ObjectKeys.shardLease(shard)
+
+    /**
+     * 读取当前租约。返回 null 表示从未有人持有过。
+     *
+     * ⚠️ 已过期的租约**仍然返回**（带原来的 epoch）——调用方需要它的 epoch
+     * 才能算出 next = old + 1。把它当成 null 会让 epoch 回到 1。
+     */
+    suspend fun current(shard: ShardId): Lease? {
+        val key = keyOf(shard)
+        val meta = try {
+            store.head(key)
+        } catch (_: ObjectNotFoundException) {
+            return null
+        }
+        val bytes = try {
+            store.get(key)
+        } catch (_: ObjectNotFoundException) {
+            return null   // head 与 get 之间被删了；当作不存在，调用方会重试
+        }
+        val text = String(bytes, Charsets.UTF_8)
+        return Lease(
+            shard = shard,
+            holder = Regex("\"holder\"\\s*:\\s*\"([^\"]*)\"").find(text)?.groupValues?.get(1) ?: "",
+            epoch = Regex("\"epoch\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
+            expiresAtMillis = Regex("\"expiresAt\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
+            etag = meta.etag.value,
+        )
+    }
+
+    /**
+     * 取得分片的写者租约。
+     *
+     * 已被别人持有时**抛异常而不是等待**——调用方是一个正要打开分片的 CN，
+     * 它应该立刻转成只读或去别处，而不是阻塞在这里。
+     */
+    override suspend fun acquire(shard: ShardId): com.cloudea.yangbase.storage.ShardLease =
+        acquireInternal(shard, 16)
+
+    private suspend fun acquireInternal(shard: ShardId, maxAttempts: Int): Lease {
+        var attempts = 0
+        while (true) {
+            val cur = current(shard)
+            if (cur != null && !cur.isExpired()) {
+                throw SqlException(
+                    MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
+                    "分片 $shard 的写者租约被 '${cur.holder}' 持有，" +
+                        "还有 ${cur.remainingMillis()}ms 到期。同一分片任一时刻只能有一个写者。",
+                )
+            }
+            val nextEpoch = (cur?.epoch ?: 0L) + 1
+            val expires = System.currentTimeMillis() + ttlMillis
+            val payload = """{"holder":"$holder","epoch":$nextEpoch,"expiresAt":$expires}""".toByteArray()
+            val pre = if (cur == null) Precondition.MustNotExist else Precondition.MustMatch(
+                com.cloudea.yangbase.objectstore.ETag(cur.etag)
+            )
+            try {
+                val etag = store.put(keyOf(shard), payload, pre)
+                Metrics.onLeaseAcquired()
+                return Lease(shard, holder, nextEpoch, expires, etag.value)
+            } catch (_: ConcurrentModificationException) {
+                // 有人抢先了，重读
+                Metrics.onLeaseContended()
+            } catch (_: PreconditionFailedException) {
+                // 同上：对方持有了，或者刚好释放；重读一次会看清
+                Metrics.onLeaseContended()
+            }
+            attempts++
+            if (attempts >= maxAttempts) {
+                Metrics.onLeaseAcquireFailed()
+                throw SqlException(
+                    MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
+                    "无法取得分片 $shard 的租约：连续 $attempts 次与别人相撞",
+                )
+            }
+            delay(1L shl minOf(attempts, 6))
+        }
+    }
+
+    /**
+     * 续期。
+     *
+     * **epoch 保持不变**——续期是同一个写者继续持有，不是换了人。
+     * 换 epoch 会让这个写者自己刚写的 WAL 前缀立刻失效。
+     */
+    override suspend fun renew(lease: com.cloudea.yangbase.storage.ShardLease):
+        com.cloudea.yangbase.storage.ShardLease {
+        require(lease is Lease) { "LeaseManager 只处理自己发出的租约" }
+        return renewInternal(lease)
+    }
+
+    private suspend fun renewInternal(lease: Lease): Lease {
+        val expires = System.currentTimeMillis() + ttlMillis
+        val payload = """{"holder":"$holder","epoch":${lease.epoch},"expiresAt":$expires}""".toByteArray()
+        return try {
+            val etag = store.put(
+                keyOf(lease.shard), payload,
+                Precondition.MustMatch(com.cloudea.yangbase.objectstore.ETag(lease.etag)),
+            )
+            lease.copy(expiresAtMillis = expires, etag = etag.value)
+        } catch (_: ConcurrentModificationException) {
+            Metrics.onLeaseLost()
+            throw com.cloudea.yangbase.common.LeaseLostException(lease.shard, Epoch(lease.epoch))
+        } catch (_: PreconditionFailedException) {
+            // etag 变了 = 有人接管了这个分片（我们的租约已经过期被人抢走）
+            Metrics.onLeaseLost()
+            throw com.cloudea.yangbase.common.LeaseLostException(lease.shard, Epoch(lease.epoch))
+        }
+    }
+
+    /**
+     * 主动释放：清空 holder 并让 TTL 立刻到期。
+     *
+     * **不删除对象**。删掉会让下一个写者的 epoch 从 1 重新开始，
+     * 而这个分片在 `wal/e{3}/` 下可能还躺着旧写者的日志——
+     * epoch 一旦被重用，那些日志就会被当成新写者的日志重放。
+     */
+    override suspend fun release(lease: com.cloudea.yangbase.storage.ShardLease) {
+        require(lease is Lease) { "LeaseManager 只处理自己发出的租约" }
+        releaseInternal(lease)
+    }
+
+    private suspend fun releaseInternal(lease: Lease) {
+        val payload = """{"holder":"","epoch":${lease.epoch},"expiresAt":0}""".toByteArray()
+        runCatching {
+            store.put(
+                keyOf(lease.shard), payload,
+                Precondition.MustMatch(com.cloudea.yangbase.objectstore.ETag(lease.etag)),
+            )
+        }
+    }
+}
