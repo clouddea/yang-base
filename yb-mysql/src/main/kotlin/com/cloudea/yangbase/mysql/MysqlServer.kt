@@ -264,7 +264,7 @@ class MysqlConnection(
         output.writePacket(b.toBytes())
     }
 
-    private fun readHandshakeResponse(): Boolean {
+    private suspend fun readHandshakeResponse(): Boolean {
         val payload = input.readPacket()
         if (payload.isEmpty()) return false
         if (payload[0].toInt() and 0xFF == 0xFF) return false   // 客户端直接报错
@@ -301,7 +301,14 @@ class MysqlConnection(
             return false
         }
 
-        if (database != null) session.currentDbName = database
+        // 初始库同样放行系统库（判据与 COM_INIT_DB 一致）
+        val initialDb: String? = database
+        if (initialDb != null &&
+            (engine.catalog.findDatabaseRefreshing(initialDb) != null ||
+                com.cloudea.yangbase.sql.InformationSchema.isSystemSchemaName(initialDb))
+        ) {
+            session.currentDbName = initialDb
+        }
         // 序号必须与客户端保持连续：客户端用 seq=1 发了响应，服务端这里必须用 seq=2。
         // 不同步的话包序号会错位，客户端会报协议错误（实现期间踩到的真实缺陷）。
         output.setSequence(input.sequence)
@@ -343,8 +350,18 @@ class MysqlConnection(
                     Packets.COM_QUIT -> return
                     Packets.COM_PING -> { sendOk(0, 0) }
                     Packets.COM_INIT_DB -> {
+                        // `use db` 在协议层就是这个命令（连接串里的库名走的也是它）。
+                        // ⚠️ 与 SQL 层的 `USE` **同一套判据**：系统库（information_schema
+                        // 等）是内存里物化的，不在 catalog 里，但要能进去——否则
+                        // `mysql information_schema`、`USE information_schema` 都会失败，
+                        // 而真实 MySQL 里那是常规用法。
+                        //
+                        // 判据同样走 `findDatabaseRefreshing`：多 CN 下目录异步传播，
+                        // 「在 CN1 建库、用 CN2 的连接」不该因为本节点还没刷新就报错
                         val dbName = session.charset.decode(args)
-                        if (engine.catalog.findDatabase(dbName) == null) {
+                        if (engine.catalog.findDatabaseRefreshing(dbName) == null &&
+                            !com.cloudea.yangbase.sql.InformationSchema.isSystemSchemaName(dbName)
+                        ) {
                             sendError(MySqlErrors.ER_BAD_DB_ERROR, "42000", "Unknown database '$dbName'")
                         } else {
                             session.currentDbName = dbName

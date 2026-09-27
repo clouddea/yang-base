@@ -194,6 +194,16 @@ class Session(val engine: DatabaseEngine) {
     val currentDb get() = currentDbName?.let { engine.catalog.findDatabase(it) }
 
     fun requireDb(): com.cloudea.yangbase.common.DatabaseSchema = currentDbName?.let {
+        // 系统库（information_schema 等）**只读**：它们是内存里物化的，没有主键、
+        // 没有分片。走到这里说明有语句想**写**它们（能读的路径不会经过 requireDb）。
+        // 必须报"这里不能写"，而不是"没有选中数据库"——后者会让人以为是自己忘了 USE，
+        // 然后去反复试 `USE information_schema`（而那一步其实是成功的）
+        if (InformationSchema.isSystemSchemaName(it)) {
+            throw SqlException(
+                MySqlErrors.ER_NOT_SUPPORTED_YET, "42000",
+                "'$it' 是只读的系统库（内存里物化，没有分片与主键），不支持写入或改结构",
+            )
+        }
         engine.catalog.findDatabase(it)
     } ?: throw SqlException(MySqlErrors.ER_BAD_DB_ERROR, "3D000", "No database selected")
 
@@ -455,7 +465,27 @@ class Executor(private val engine: DatabaseEngine) {
             }
         }
 
-        is UseStmt -> { session.currentDbName = stmt.name; OkResult(0) }
+        is UseStmt -> {
+            // `USE information_schema` 必须成功：真实 MySQL 里它就是一个 schema，
+            // 客户端与手敲命令的人都会这么进（进去之后 `SHOW TABLES`、
+            // 不带库名的 `SELECT ... FROM tables` 都要能用）。这些库是内存里物化的，
+            // 不在 catalog 里，所以要单独放行。
+            //
+            // 反过来，**不存在的库必须报错**：静默成功会让后面每条语句都报
+            // "表不存在"，而真正的原因（库名敲错了）在很远的地方。
+            //
+            // 判据走 [com.cloudea.yangbase.txn.Catalog.findDatabaseRefreshing]：
+            // 多 CN 下目录是异步传播的，「CN1 建库 → CN2 立刻 USE」本来就会落在
+            // 一个窗口里。按本地目录直接判会把那个窗口变成一句"库不存在"
+            if (!InformationSchema.isSystemSchemaName(stmt.name)) {
+                engine.catalog.findDatabaseRefreshing(stmt.name)
+                    ?: throw SqlException(
+                        MySqlErrors.ER_BAD_DB_ERROR, "42000", "Unknown database '${stmt.name}'",
+                    )
+            }
+            session.currentDbName = stmt.name
+            OkResult(0)
+        }
 
         is CreateTableStmt -> createTable(session, stmt)
 
@@ -1682,13 +1712,23 @@ class Executor(private val engine: DatabaseEngine) {
      * 做 introspection 时的常见写法（`SELECT ... FROM mydb.mytable`）。
      */
     private fun resolveTable(session: Session, rawName: String): TableSchema {
-        val dot = rawName.indexOf('.')
+        // 当前库是系统库时，裸表名要先补成限定名才能被认出来（见 [qualifiedUnderCurrent]）
+        val name = qualifiedUnderCurrent(session, rawName)
+        val dot = name.indexOf('.')
+        if (dot > 0 && InformationSchema.isSystemSchemaName(name.substring(0, dot))) {
+            // 系统库是内存里物化的**只读**视图，没有主键、没有分片。写它必须报错，
+            // 而且要说清是"这里不能写"，不是"表不存在"——后者会让人去找建表语句
+            throw SqlException(
+                MySqlErrors.ER_NOT_SUPPORTED_YET, "42000",
+                "'${name.substring(0, dot)}' 是只读的系统库（内存里物化，没有分片），不支持写入或改结构",
+            )
+        }
         if (dot < 0) {
             val db = session.requireDb()
-            return engine.catalog.requireTable(db.databaseId, rawName)
+            return engine.catalog.requireTable(db.databaseId, name)
         }
-        val schema = rawName.substring(0, dot)
-        val table = rawName.substring(dot + 1)
+        val schema = name.substring(0, dot)
+        val table = name.substring(dot + 1)
         val db = engine.catalog.requireDatabase(schema)
         return engine.catalog.requireTable(db.databaseId, table)
     }
@@ -1784,8 +1824,28 @@ class Executor(private val engine: DatabaseEngine) {
         )
     }
 
+    /**
+     * 当前库是**系统库**时，把裸表名补成限定名（`tables` → `information_schema.tables`）。
+     *
+     * 存在的原因是 `USE information_schema; SELECT * FROM tables` 是**真实 MySQL 的
+     * 常规用法**（也是不少客户端的做法）：那些库名在 catalog 里根本不存在，
+     * 它们是内存里物化的，所以必须先补全才能被认出来。
+     */
+    private fun qualifiedUnderCurrent(session: Session, raw: String): String {
+        if (raw.contains('.')) return raw
+        val cur = session.currentDbName ?: return raw
+        return if (InformationSchema.isSystemSchemaName(cur)) "$cur.$raw" else raw
+    }
+
     private suspend fun select(session: Session, stmt: SelectStmt): ResultSet {
         if (stmt.table == null) return selectConstants(session, stmt)
+        // 系统库里的裸表名先补全（见 qualifiedUnderCurrent）：`SelectStmt` 是 data class，
+        // 直接 copy 一份改表名，比在下面每个分支里各判一次干净
+        val rawTable = stmt.table!!
+        if (!rawTable.contains('.')) {
+            val qualified = qualifiedUnderCurrent(session, rawTable)
+            if (qualified != rawTable) return select(session, stmt.copy(table = qualified))
+        }
 
         // information_schema / performance_schema 等系统库不是真实的表：
         // 它们由内存中的 catalog 直接物化。没有这一层，DataGrip / Navicat
@@ -3924,9 +3984,16 @@ class Executor(private val engine: DatabaseEngine) {
         )
 
         "DATABASES", "SCHEMAS" -> {
-            val dbs = engine.catalog.listDatabases()
-                .filter { stmt.like == null || Eval.likeMatch(Datum.Str(it.name), Datum.Str(stmt.like)) }
-            ResultSet(listOf("Database"), dbs.map { listOf(Datum.Str(it.name)) })
+            // 系统库也要列出来：MySQL 的 `SHOW DATABASES` 就包含 information_schema
+            // 与 performance_schema。少了它们，客户端（以及靠"看得见的库列表"工作的
+            // 工具）会以为这台服务器没有系统库——`mysqldump --all-databases` 更是
+            // **靠这个名字来跳过它们**的
+            val names = listOf("information_schema", "performance_schema") +
+                engine.catalog.listDatabases().map { it.name }
+            val filtered = names.filter {
+                stmt.like == null || Eval.likeMatch(Datum.Str(it), Datum.Str(stmt.like))
+            }
+            ResultSet(listOf("Database"), filtered.map { listOf(Datum.Str(it)) })
         }
         // ★ `SHOW TABLE STATUS` —— **mysqldump 逐表取元数据**的那一步。
         //
@@ -3992,29 +4059,49 @@ class Executor(private val engine: DatabaseEngine) {
             // `SHOW TABLES [FROM db]`：**FROM 指定的库名优先于当前库**（与 MySQL 一致）。
             // 此前 `FROM db` 被解析出来却没人用，于是 `SHOW TABLES FROM a`（当前库为 b）
             // 要么报"没有选中数据库"、要么答非所问地列出 b 的表
-            val db = if (stmt.name != null) {
-                engine.catalog.findDatabase(stmt.name)
-                    ?: throw SqlException(
-                        MySqlErrors.ER_BAD_DB_ERROR, "42000", "Unknown database '${stmt.name}'",
-                    )
+            //
+            // 系统库（`information_schema` 等）不在 catalog 里，它们是**内存里物化**的：
+            // 这里列出它们的表名，好让 `USE information_schema; SHOW TABLES` 像 MySQL 一样工作
+            val sysDb = stmt.name ?: session.currentDbName
+            if (sysDb != null && InformationSchema.isSystemSchemaName(sysDb)) {
+                val known = if (sysDb.equals("information_schema", true)) InformationSchema.TABLE_NAMES
+                else emptyList()
+                val names = known.filter {
+                    stmt.like == null || Eval.likeMatch(Datum.Str(it), Datum.Str(stmt.like))
+                }
+                ResultSet(
+                    if (stmt.full) listOf("Tables_in_$sysDb", "Table_type")
+                    else listOf("Tables_in_$sysDb"),
+                    names.map {
+                        if (stmt.full) listOf(Datum.Str(it), Datum.Str("SYSTEM VIEW"))
+                        else listOf(Datum.Str(it))
+                    },
+                )
             } else {
-                session.requireDb()
+                val db = if (stmt.name != null) {
+                    engine.catalog.findDatabase(stmt.name)
+                        ?: throw SqlException(
+                            MySqlErrors.ER_BAD_DB_ERROR, "42000", "Unknown database '${stmt.name}'",
+                        )
+                } else {
+                    session.requireDb()
+                }
+                val ts = engine.catalog.listTables(db.databaseId)
+                    .filter { stmt.like == null || Eval.likeMatch(Datum.Str(it.name), Datum.Str(stmt.like)) }
+                ResultSet(
+                    // `SHOW FULL TABLES` 多一列 Table_type —— 客户端（尤其 mysqldump）
+                    // 靠它区分表与视图。少这一列会让它们读到 NULL 并崩溃
+                    if (stmt.full) listOf("Tables_in_${db.name}", "Table_type")
+                    else listOf("Tables_in_${db.name}"),
+                    ts.map {
+                        if (stmt.full) {
+                            listOf(Datum.Str(it.name), Datum.Str(if (it.isView) "VIEW" else "BASE TABLE"))
+                        } else {
+                            listOf(Datum.Str(it.name))
+                        }
+                    },
+                )
             }
-            val ts = engine.catalog.listTables(db.databaseId)
-                .filter { stmt.like == null || Eval.likeMatch(Datum.Str(it.name), Datum.Str(stmt.like)) }
-            ResultSet(
-                // `SHOW FULL TABLES` 多一列 Table_type —— 客户端（尤其 mysqldump）
-                // 靠它区分表与视图。少这一列会让它们读到 NULL 并崩溃
-                if (stmt.full) listOf("Tables_in_${db.name}", "Table_type")
-                else listOf("Tables_in_${db.name}"),
-                ts.map {
-                    if (stmt.full) {
-                        listOf(Datum.Str(it.name), Datum.Str(if (it.isView) "VIEW" else "BASE TABLE"))
-                    } else {
-                        listOf(Datum.Str(it.name))
-                    }
-                },
-            )
         }
         "VARIABLES" -> {
             val vars = listOf(

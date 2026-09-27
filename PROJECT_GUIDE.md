@@ -226,7 +226,9 @@ MySQL 协议 · SQL 子集 · TSO 与 Catalog · 计算节点无状态 · **分�
 全文检索**（§8.6：FST + postings 分块 + WAND + BM25，`WITH PARSER ngram`）·
 **GC 与时间旅行**（GC 水位 · `AS OF TIMESTAMP` · PITR · 备份恢复 ·
 `DROP TABLE` 墓碑）· **ALTER TABLE**（加列 / 删末尾列 / 加删索引 / 改名 / TRUNCATE，
-无重写）· **`SHOW CREATE TABLE` / `SHOW INDEX` / `information_schema`** ·
+无重写）· **`SHOW CREATE TABLE` / `SHOW INDEX` / `information_schema`**
+（系统库能像真 schema 一样进去：`SHOW DATABASES` 列出它 · `USE information_schema`
+之后 `SHOW TABLES` 与裸表名查询都可用 · 写它报"只读的系统库"）·
 **CDC 变更流**（读现有 WAL，无第二份日志）· **自增分段分配**（§11.4）·
 **在线索引构建**（§8.7：BUILDING → 快照回填 → 增量追平 → ACTIVE）·
 **可观测性**（§12.5：`/metrics` + `/healthz`、慢查询日志、对象存储审计日志；

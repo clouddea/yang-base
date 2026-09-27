@@ -58,6 +58,82 @@ class InformationSchemaTest {
 
     private fun Connection.st() = createStatement()
 
+    // ── 它必须**像一个 schema**（不只是"能查"）────────────────────
+
+    /**
+     * ★ `information_schema` 必须能像真实 MySQL 那样被"进去"。
+     *
+     * 只支持 `SELECT ... FROM information_schema.x` 是不够的：真实 MySQL 里它就是一个
+     * schema——`SHOW DATABASES` 列它、`USE information_schema` 进得去、进去之后
+     * `SHOW TABLES` 与**不带库名的** `SELECT ... FROM tables` 都能用。
+     * 手敲命令的人和靠"看得见的库列表"工作的工具都按这个来。
+     */
+    @Test
+    fun `能像 schema 一样使用 information_schema`() {
+        connect().use { c ->
+            // 先造一张用户表：否则 `information_schema.tables` **本来就该是空的**，
+            // 下面"不带库名的查询能取到行"这条断言会在一个正确实现上失败（第一版就是这样）
+            c.st { it.execute("CREATE DATABASE IF NOT EXISTS isdb") }
+            c.st { it.execute("USE isdb") }
+            c.st { it.execute("DROP TABLE IF EXISTS probe") }
+            c.st { it.execute("CREATE TABLE probe (id BIGINT PRIMARY KEY)") }
+
+            // 出现在库列表里（`mysqldump --all-databases` 也靠这个名字跳过系统库）
+            val dbs = c.st().query("SHOW DATABASES").map { it[0].toString() }
+            assertTrue(dbs.contains("information_schema"), "SHOW DATABASES 应当列出系统库：$dbs")
+
+            // 以它为默认库连上来 + USE 进去，两条路都要通
+            val viaUrl = DriverManager.getConnection(
+                "jdbc:mysql://127.0.0.1:$port/information_schema?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
+                "root", "",
+            )
+            viaUrl.use { ic ->
+                assertEquals("information_schema", ic.st().query("SELECT DATABASE()")[0][0].toString())
+
+                // 进去之后：SHOW TABLES 列出物化的虚拟表
+                val tables = ic.st().query("SHOW TABLES").map { it[0].toString() }
+                assertTrue(tables.contains("tables") && tables.contains("columns"), "应列出虚拟表：$tables")
+
+                // **不带库名**的查询要能解析到虚拟表上
+                assertTrue(ic.st().query("SELECT COUNT(*) FROM schemata")[0][0] is Number)
+                assertTrue(ic.st().query("SELECT table_name FROM tables").isNotEmpty())
+
+                // 限定名照旧
+                assertTrue(ic.st().query("SELECT COUNT(*) FROM information_schema.columns")[0][0] is Number)
+            }
+            c.st { it.execute("USE information_schema") }
+        }
+    }
+
+    @Test
+    fun `系统库只读且错误指向真正的原因`() {
+        connect().use { c ->
+            c.st { it.execute("USE information_schema") }
+            for (sql in listOf(
+                "INSERT INTO information_schema.tables VALUES (1)",
+                "UPDATE information_schema.tables SET table_name = 'x'",
+                "DROP TABLE information_schema.tables",
+            )) {
+                val e = runCatching { c.st { it.execute(sql) } }.exceptionOrNull()
+                assertTrue(e is java.sql.SQLException, "写系统库必须报错：$sql")
+                // 不能是"没有选中数据库"——那会让人以为是自己忘了 USE，
+                // 而 `USE information_schema` 那一步其实成功了
+                assertTrue(
+                    e.message!!.contains("只读的系统库"),
+                    "错误要指向真正的原因（只读系统库），实际：${e.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `USE 一个不存在的库要报错而不是静默成功`() {
+        connect().use { c ->
+            val e = runCatching { c.st { it.execute("USE no_such_db_here") } }.exceptionOrNull()
+            assertTrue(e is java.sql.SQLException, "USE 不存在的库必须报错（静默成功会让后面每条语句都报表不存在）")
+        }
+    }
+
     @Test
     fun `SCHEMATA 列出全部库`() {
         connect().use { c ->

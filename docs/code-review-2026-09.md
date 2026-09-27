@@ -264,6 +264,25 @@ S1 只有严格客户端才校验；S2 的用例全写表级主键；S3 只有�
 所以这一轮补的三条断言都刻意写在**真实使用形态**上（真序号、真写法、真语句），
 而不是再加几条单元断言。
 
+### 第三轮续三：`information_schema` 只能"远观"（2026-09-25，使用者提问暴露）
+
+> 现象：被问「为什么现在没有 information_schema」——它其实一直在，
+> `SELECT * FROM information_schema.tables` 也一直能查，但**没有任何一条
+> 真实使用路径进得去它**。这条被记为缺陷，而不是"文档没写清楚"。
+
+| # | 缺陷 | 触发 | 后果 | 守护测试 |
+|---|---|---|---|---|
+| S9 | **`information_schema` 不是一个能进去的 schema**：不进 `SHOW DATABASES`；`USE information_schema` 静默"成功"但随后 `SHOW TABLES` 是空的、裸表名 `SELECT … FROM tables` 报"表不存在"；连接串里的库名不生效；写它报的是"没有选中数据库" | 真实 MySQL 的常规用法：`mysql information_schema`、`USE information_schema; SHOW TABLES`、靠"看得见的库列表"工作的客户端 | 使用者被告知"没有 information_schema"。**手敲命令的人和工具都按真实 MySQL 的用法来**，而我们的实现只认限定名 | `InformationSchemaTest > 能像 schema 一样使用 information_schema`、`… > 系统库只读且错误指向真正的原因` |
+| S10 | **`USE 不存在的库` 曾经静默成功**；改成报错之后，**在多 CN 下会误报**（目录是异步传播的，"CN1 建库 → CN2 立刻 USE"落在窗口里） | 多 CN 部署：一个 CN 上做 DDL，另一个 CN 上立刻用 | 两种错法都是"指错方向"：静默成功 → 后面每条语句都报"表不存在"；严格判本地目录 → 一个**确实存在**的库报 `Unknown database`，看起来像"我刚建的库没了" | `InformationSchemaTest > USE 一个不存在的库要报错而不是静默成功` + `MultiCnCoordinationTest > CN1 新建的库，CN2 的新连接必须立刻能用` |
+
+**S10 的修法值得记一笔**：放宽判据（回到静默成功）与收紧判据（只看本地目录）
+**都是错的**——真正的修法是 `USE` / 连接串库名 / `COM_INIT_DB` 在本地目录未命中时
+**先刷新一次目录再判**（`Catalog.findDatabaseRefreshing`），并且只在**目录版本确实变了**
+时才真的重载：命中 0 次请求、敲错库名仍然报错、多 CN 的窗口不再被当成"库不存在"。
+新增的回归用例**刻意不加等待、不做重试**，只用连接串里的库名——去掉刷新它立刻红
+（实测报 `No database selected`）。两类窗口（时间戳窗口、目录传播窗口）写进了
+用户文档：`compatibility.md` §4.4.3。
+
 ---
 
 ## 三、文档一致性

@@ -278,6 +278,43 @@ class MultiCnCoordinationTest {
         }
     }
 
+    // ── 跨 CN 的目录传播 ──────────────────────────────────────────
+
+    /**
+     * ★ **CN1 刚建的库，CN2 的新连接必须立刻能用。**
+     *
+     * 目录在 CN 之间是**异步传播**的（轮询版本号 / MS 通知，§4.5），所以这里有一个
+     * 真实存在的窗口：CN1 上 `CREATE DATABASE d` 返回时，`d` 已经写进对象存储，
+     * 但 CN2 的内存目录要等它下一次刷新才知道。窗口里若只按本地目录回答，
+     * CN2 会对一个**确实存在**的库报 `Unknown database 'd'`——使用者看到的是
+     * 「我刚建的库没了」，重试一下又好了，于是它会被当成偶发抖动而永远查不清。
+     *
+     * 因此 `USE` / `COM_INIT_DB` / 握手初始库这三条路径都必须**先刷新一次目录再判**
+     * （[com.cloudea.yangbase.txn.Catalog.findDatabaseRefreshing]）。
+     *
+     * 这个用例刻意**不加等待、不做重试**，并且 CN2 侧只靠连接串里的库名
+     * （握手路径，不补一句 `USE`）——一旦退回"只看本地目录"，它立刻红。
+     */
+    @Test
+    fun `CN1 新建的库，CN2 的新连接必须立刻能用`() {
+        val cn1 = startCn("cn-cat-1")
+        val cn2 = startCn("cn-cat-2")
+        try {
+            connect(cn1, "").use { c ->
+                c.exec("CREATE DATABASE catw")
+                c.exec("USE catw")
+                c.exec("DROP TABLE IF EXISTS t_cat")
+                c.exec("CREATE TABLE t_cat (id BIGINT NOT NULL, v INT, PRIMARY KEY (id))")
+                c.exec("INSERT INTO t_cat VALUES (1, 7)")
+            }
+            connect(cn2, "catw").use { c ->
+                assertEquals(7L, c.queryLong("SELECT v FROM t_cat WHERE id = 1"))
+            }
+        } finally {
+            cn1.stop(); cn2.stop()
+        }
+    }
+
     // ── 跨 CN 的行锁 ──────────────────────────────────────────────
 
     /**

@@ -43,7 +43,31 @@ object InformationSchema {
         }
     }
 
-    /** 归一化库名：`SELECT ... FROM information_schema.TABLES` 与反引号写法都要认。 */
+    /**
+     * `information_schema` 里**有名字**的那些表（含"存在但为空"的）。
+     *
+     * 用途是让 `USE information_schema; SHOW TABLES` 能列出它们——真实 MySQL 里
+     * `information_schema` 就是一个 schema，客户端（和手敲命令的人）都会这么用。
+     */
+    val TABLE_NAMES: List<String> = listOf(
+        "schemata", "tables", "columns", "key_column_usage", "table_constraints",
+        "partitions", "views", "engines", "character_sets", "collations", "processlist",
+        "triggers", "routines", "events", "referential_constraints", "table_privileges",
+        "schema_privileges", "user_privileges", "column_privileges", "check_constraints",
+        "parameters", "plugins",
+    )
+
+    /**
+     * 这是不是一个**系统库名**（`USE` 时用来区分"真库"与"内存里物化的系统库"）。
+     *
+     * ⚠️ 与 [isSystemSchema] 的区别：那个判的是**限定表名**（含点），这个判的是**库名**。
+     */
+    fun isSystemSchemaName(name: String): Boolean {
+        val n = name.lowercase()
+        return n == "information_schema" || n == "performance_schema" || n == "mysql" || n == "sys"
+    }
+
+    /** 判据是**限定表名**（含点的 `information_schema.TABLES` 形态）；只判库名用 [isSystemSchemaName]。 */
     private fun isSystemSchema(name: String): Boolean {
         val n = name.lowercase()
         return n.startsWith("information_schema.") || n.startsWith("performance_schema.") ||

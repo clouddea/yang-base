@@ -55,10 +55,29 @@ class Catalog(
     private val nextIndexId = AtomicLong(10000)
     private val ddlMutex = Mutex()
 
+    /**
+     * 本地内存目录对应的**目录版本**（[load] 成功时记下）。
+     *
+     * `null` 表示"当前内存目录的版本未知"——可能是没有协调服务、也可能是上一次
+     * [load] 中途失败了。两种情况下都不能拿它做"本地一定是最新的"的判断
+     * （见 [findDatabaseRefreshing]），否则一次失败的加载会被固定下来。
+     */
+    @Volatile
+    private var loadedVersion: Long? = null
+
     // ── 打开与加载 ────────────────────────────────────────────────
 
     /** 把整个 catalog 加载进内存。它很小，一次性加载即可。 */
     suspend fun load() {
+        // ★ 版本必须在**列目录之前**取，并且版本未知时要先把 [loadedVersion] 置空：
+        //
+        //  - 先列后取版本，会把"列目录之后、记版本之前"发生的那次 DDL 记成
+        //    "已经包含在本次加载里"，那次 DDL 就永久丢了（要等下一次 DDL 才带上）；
+        //  - 中途失败时不置空，等于把一份**残缺的内存目录**标成"最新"，
+        //    于是别的 CN 已经建好的库在本节点会被判成"不存在"。
+        loadedVersion = null
+        val versionAt = coordination?.let { runCatching { it.catalogVersion() }.getOrNull() }
+
         // ★ 这是**整表替换**，不是"合并"。
         //
         // 少了这两行 `clear()`，`load()` 只能往里加、不能往外减——于是
@@ -109,6 +128,8 @@ class Catalog(
         }
         nextTableId.set(maxTableId + 1)
         nextIndexId.set(maxIndexId + 1)
+        // 加载完成才认账：抛异常时留在 null（下次查询会重新加载，而不是拿残缺目录当最新）
+        loadedVersion = versionAt
     }
 
     private suspend fun <T> readJson(key: String, parse: (String) -> T): T =
@@ -145,6 +166,37 @@ class Catalog(
     }
 
     fun findDatabase(name: String): DatabaseSchema? = dbsByName[name.lowercase()]
+
+    /**
+     * 找库；**本地内存目录里没有时，先重载一次目录再找**。
+     *
+     * 目录在多个 CN 之间是**异步传播**的（轮询版本号 / MS 通知，§4.5），于是存在一个
+     * 真实窗口：「在 CN1 上 `CREATE DATABASE d` 成功返回，紧接着在 CN2 上 `USE d`」——
+     * 库已经提交、对象已经 PUT，但 CN2 的内存目录还是旧的。只按本地目录判断，
+     * 这里会报 `Unknown database 'd'`。那是**最坏的一类错误**：库明明存在，
+     * 使用者看到的是"我刚建的库不见了"，症状与原因毫无关系（看起来像 DDL 丢了，
+     * 实际只是本节点还没刷新）；再敲一次往往又好了，于是它会被当成偶发抖动。
+     *
+     * 代价被限制在 **miss 路径**上，而且只有在**确有证据本地目录落后**时才真的重载：
+     * 先问一次目录版本（协调服务上一次 GET / 一次 RPC），版本没变就说明本地这份
+     * 就是最新的——那么"找不到"就是**真的找不到**（多半是名字敲错了），
+     * 不必为一次误敲把整个目录（1 次 LIST + 每个库/表各一次 GET）重新拉一遍。
+     *
+     * 反过来（静默放行不存在的库）不行：后面每条语句都会报"表不存在"，
+     * 而真正的原因在很远的地方。
+     */
+    suspend fun findDatabaseRefreshing(name: String): DatabaseSchema? {
+        findDatabase(name)?.let { return it }
+        val coord = coordination
+        val local = loadedVersion
+        if (coord != null && local != null) {
+            val remote = runCatching { coord.catalogVersion() }.getOrNull()
+            // 版本一致 ⇒ 本地目录已经是最新的 ⇒ 这个库确实不存在
+            if (remote != null && remote == local) return null
+        }
+        load()
+        return findDatabase(name)
+    }
 
     fun requireDatabase(name: String): DatabaseSchema = findDatabase(name)
         ?: throw SqlException(MySqlErrors.ER_BAD_DB_ERROR, "42000", "Unknown database '$name'")

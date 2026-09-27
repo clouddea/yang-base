@@ -268,6 +268,8 @@ DELETE FROM t [WHERE ...];
 
 -- 元数据查询（客户端与导出工具依赖）
 SHOW DATABASES;  SHOW TABLES [FROM db] [LIKE 'x'];
+USE information_schema;              -- 系统库和真库一样能进（SHOW TABLES / 不带库名的查询都能用）
+SELECT * FROM information_schema.tables;   -- 也可以始终用限定名
 SHOW FULL TABLES [FROM db];         -- 多一列 Table_type（BASE TABLE / VIEW）
 SHOW TABLE STATUS [FROM db] [LIKE 'x'];   -- mysqldump 逐表取元数据用
 SHOW TRIGGERS [FROM db] [LIKE 'x']; -- 本系统不支持触发器，返回空集
