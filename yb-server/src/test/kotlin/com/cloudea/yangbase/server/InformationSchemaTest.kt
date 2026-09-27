@@ -58,6 +58,46 @@ class InformationSchemaTest {
 
     private fun Connection.st() = createStatement()
 
+    @Test
+    fun `Workbench 使用单引号别名获取列元数据`() {
+        connect().use { c ->
+            c.createStatement().use { s ->
+                s.queryTimeout = 5
+                s.execute("CREATE DATABASE wb_metadata")
+                s.execute("USE wb_metadata")
+                s.execute("CREATE TABLE articles(id BIGINT PRIMARY KEY, body TEXT)")
+                s.executeQuery(
+                    """
+                    SELECT COLUMN_NAME as 'name', COLUMN_TYPE as 'type',
+                        IS_NULLABLE='NO' as 'not_null', COLUMN_DEFAULT as 'default',
+                        COLUMN_KEY='PRI' as 'is_pk', EXTRA='auto_increment' as 'auto_increment',
+                        TABLE_SCHEMA as 'schema', TABLE_NAME as 'table'
+                    FROM information_schema.COLUMNS
+                    WHERE (TABLE_SCHEMA = 'wb_metadata' AND TABLE_NAME = 'articles' AND COLUMN_NAME = 'id')
+                       OR (TABLE_SCHEMA = 'wb_metadata' AND TABLE_NAME = 'articles' AND COLUMN_NAME = 'body')
+                    ORDER BY ORDINAL_POSITION
+                    """.trimIndent(),
+                ).use { rs ->
+                    assertEquals(
+                        listOf("name", "type", "not_null", "default", "is_pk", "auto_increment", "schema", "table"),
+                        (1..rs.metaData.columnCount).map { rs.metaData.getColumnLabel(it) },
+                    )
+                    assertTrue(rs.next())
+                    assertEquals("id", rs.getString("name"))
+                    assertEquals("bigint", rs.getString("type"))
+                    assertTrue(rs.getBoolean("is_pk"))
+                    assertTrue(rs.getBoolean("not_null"))
+                    assertEquals("wb_metadata", rs.getString("schema"))
+                    assertEquals("articles", rs.getString("table"))
+                    assertTrue(rs.next())
+                    assertEquals("body", rs.getString("name"))
+                    assertEquals(false, rs.getBoolean("is_pk"))
+                    assertEquals(false, rs.next())
+                }
+            }
+        }
+    }
+
     // ── 它必须**像一个 schema**（不只是"能查"）────────────────────
 
     /**

@@ -182,6 +182,81 @@ class YbCliTest {
         }
     }
 
+    /**
+     * ★ **`restore` 必须在没有 ETag CAS 的后端上真的能跑通**（2026-09-27，评审指出）。
+     *
+     * 这条用例的来历值得写清楚：上一版只断言了"开关被认出来并告警"——
+     * 而开关当时**只传给了 `DatabaseEngine`**，真正切 `manifest/CURRENT` 指针的是
+     * `SnapshotManager` 内部的 `ManifestStore`，它有自己的一份开关（默认关）。
+     * 于是 `restore --yes` 在 OSS 上照样报"需要条件写能力"，
+     * 而测试因为没走到真正切指针那一步（没传 `--yes`）**照样是绿的**。
+     *
+     * 所以这里做一次**真实的备份 → 恢复往返**：先种一张表与一个分片，
+     * 用 CLI 备份，再用 CLI 恢复，断言真的恢复了分片（而不是只看告警文本）。
+     */
+    @Test
+    fun `restore 在没有 CAS 的后端上带上开关才真的能恢复`() {
+        val s3 = com.cloudea.yangbase.objectstore.EmbeddedS3Server("cli-restore").apply {
+            ossStyle = true
+            start()
+        }
+        val store = com.cloudea.yangbase.objectstore.S3ObjectStore.create(
+            bucket = "cli-restore", endpoint = s3.endpoint, region = "us-east-1",
+            accessKey = "t", secretKey = "t", pathStyle = true,
+            caps = com.cloudea.yangbase.objectstore.ObjectStoreCapabilities.OSS,
+        )
+        try {
+            // ── 种数据：一张表 + 一个已 flush 的分片（不经过 CLI，CLI 没有写 SQL 的命令）
+            val engine = com.cloudea.yangbase.txn.DatabaseEngine(
+                store,
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default),
+                nodeId = "seed",
+            )
+            kotlinx.coroutines.runBlocking {
+                engine.open()
+                val db = engine.catalog.createDatabase("rdb")
+                val t = engine.catalog.createTable(
+                    db.databaseId, "t",
+                    listOf(com.cloudea.yangbase.common.ColumnDef("id", com.cloudea.yangbase.common.ColumnType.BIGINT, false)),
+                    listOf("id"),
+                )
+                // flush 一次 → 写出该分片的 manifest（整份备份只需要这一个引用）
+                val shard = engine.allShards(t).single()
+                engine.shardStore(shard, t).flush()
+                engine.close()
+            }
+
+            val base = arrayOf(
+                "--endpoint", s3.endpoint, "--bucket", "cli-restore",
+                "--access-key", "t", "--secret-key", "t",
+                "--path-style", "true", "--s3-oss",
+            )
+            // ① 备份（只读操作，用不上条件写）
+            val backupOut = cliRaw("backup", "--note", "e2e", *base)
+            val key = Regex("备份已创建: (\\S+)").find(backupOut)?.groupValues?.get(1)
+            assertTrue(key != null, "备份应当成功并打印 key，实际：\n$backupOut")
+
+            // ② 不带开关恢复：必须**明确失败**（切指针要用 If-Match）
+            val refused = runCatching {
+                cliRaw("restore", "--from", key!!, "--yes", *base)
+            }.exceptionOrNull()
+            assertTrue(
+                refused is com.cloudea.yangbase.common.CapabilityNotSupportedException,
+                "没有开关时必须在切指针处明确拒绝，实际：$refused",
+            )
+
+            // ③ 带上开关：真的恢复（这一步才是本条用例的重点）
+            val restored = cliRaw("restore", "--from", key, "--yes", "--i-accept-nonatomic-pointer-switch", *base)
+            assertTrue(
+                restored.contains("已恢复 1 个分片"),
+                "带开关必须真的恢复那个分片，实际：\n$restored",
+            )
+        } finally {
+            runCatching { store.close() }
+            runCatching { s3.stop() }
+        }
+    }
+
     @Test
     fun `ls 在空存储上不崩`() {
         val out = cli("ls")

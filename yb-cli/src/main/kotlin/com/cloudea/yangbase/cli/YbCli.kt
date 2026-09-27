@@ -50,6 +50,17 @@ object YbCli {
             System.err.println("错误: ${e.message}")
             if (e.code == 2) usage()
             exitProcess(e.code)
+        } catch (e: com.cloudea.yangbase.common.CapabilityNotSupportedException) {
+            // ★ 能力缺失要给**命令行上的出路**，不能只把内部名字抛出来。
+            // 这一层是唯一知道"本命令的名字长什么样"的地方：存储层只知道
+            // `allowNonAtomicPointerSwitch`，而使用者手里敲的是
+            // `--i-accept-nonatomic-pointer-switch`
+            System.err.println(
+                "执行失败: ${e.message}\n" +
+                    "  · 若这是阿里云 OSS 这类**没有 ETag CAS** 的后端，且确认是单写者部署，\n" +
+                    "    可加 --i-accept-nonatomic-pointer-switch 接受降级（含义见 yb-cli help）",
+            )
+            exitProcess(1)
         } catch (e: Exception) {
             System.err.println("执行失败: ${e.message}")
             exitProcess(1)
@@ -106,6 +117,11 @@ object YbCli {
               --s3-oss                后端是阿里云 OSS：改用它的原语（原子创建走
                                       x-oss-forbid-overwrite、无 ETag CAS），
                                       寻址默认切到三级域名
+              --i-accept-nonatomic-pointer-switch
+                                      接受这个后端上协调写入失去原子性（单写者部署，
+                                      与 yb-server 的同名开关含义一致）。**写命令**
+                                      （restore / pitr / gc --delete 之外的写路径）
+                                      在没有 ETag CAS 的后端上需要它，否则明确报错
               也可用环境变量 YB_S3_ENDPOINT / YB_S3_BUCKET / YB_S3_ACCESS_KEY /
               YB_S3_SECRET_KEY / YB_S3_PATH_STYLE / YB_S3_OSS
 
@@ -151,6 +167,15 @@ object YbCli {
         return out
     }
 
+    /**
+     * `--i-accept-nonatomic-pointer-switch`（与 `yb-server` 同名同义）。
+     *
+     * 判据只认命令行开关，**不读环境变量**：这是一个"我知道后果"的开关，
+     * 让它从环境里悄悄生效，等于让一次误配置在无人察觉的情况下削弱互斥。
+     */
+    private fun acceptNonAtomic(o: Map<String, String>): Boolean =
+        o.containsKey("i-accept-nonatomic-pointer-switch")
+
     private fun openStore(o: Map<String, String>): ObjectStore {
         o["fs"]?.let { return LocalFileObjectStore(java.nio.file.Path.of(it)) }
         val endpoint = o["endpoint"] ?: System.getenv("YB_S3_ENDPOINT")
@@ -190,13 +215,31 @@ object YbCli {
      * 只有明确要改数据的命令（`restore`/`pitr`）才传 false，且它们自身
      * 要求 `--yes`。
      */
-    private fun engineOf(store: ObjectStore, readOnly: Boolean = true): DatabaseEngine {
+    private fun engineOf(
+        store: ObjectStore,
+        readOnly: Boolean = true,
+        allowNonAtomicPointerSwitch: Boolean = false,
+    ): DatabaseEngine {
         val e = DatabaseEngine(
             store,
             CoroutineScope(SupervisorJob() + Dispatchers.Default),
             nodeId = "cli",
             readOnly = readOnly,
+            // ★ 与 yb-server 的 `--i-accept-nonatomic-pointer-switch` 是**同一件事**：
+            // 恢复类命令（restore / pitr）要写数据 → 要时间戳 → 在 OSS 这类没有
+            // ETag CAS 的后端上会撞上"时间戳水位需要 CAS"。不给这个开关的话，
+            // 那些命令在 OSS 上**没有任何办法**跑起来（而它们在 S3/MinIO 上正常），
+            // 使用者只会看到一句与"我想做恢复"无关的错误。
+            allowNonAtomicPointerSwitch = allowNonAtomicPointerSwitch,
         )
+        if (allowNonAtomicPointerSwitch) {
+            // 与 yb-server 同款告警：**降级必须看得见**。运维命令跑完就退出，
+            // 没有 /metrics、也没人会回头翻日志，所以这句只能打在标准输出上
+            println(
+                "⚠️ 已按 --i-accept-nonatomic-pointer-switch 运行：本后端没有 ETag CAS，" +
+                    "manifest 指针切换 / 时间戳水位 / 自增段水位在**单写者**部署下退化为「写后回读校验」",
+            )
+        }
         runBlocking { e.open() }
         return e
     }
@@ -575,8 +618,14 @@ object YbCli {
 
     private suspend fun restore(o: Map<String, String>) {
         val store = openStore(o)
-        val engine = engineOf(store, readOnly = false)   // 这两个命令会改数据（切换 CURRENT 指针）
-        val mgr = com.cloudea.yangbase.txn.SnapshotManager(store, engine)
+        // 这两个命令会改数据（切换 CURRENT 指针）→ 需要时间戳 → 在无 CAS 的后端上
+        // 必须有显式同意才能降级（见 engineOf 的说明）
+        val engine = engineOf(store, readOnly = false, allowNonAtomicPointerSwitch = acceptNonAtomic(o))
+        // ⚠️ 开关必须**同时**给 SnapshotManager：切 CURRENT 指针的是它内部的 ManifestStore。
+        // 只给引擎的话，"引擎开好了、备份也做了，restore 却在切指针时报条件写能力不足"
+        val mgr = com.cloudea.yangbase.txn.SnapshotManager(
+            store, engine, allowNonAtomicPointerSwitch = acceptNonAtomic(o),
+        )
         val key = o["from"] ?: mgr.listBackups().lastOrNull()
             ?: throw CliError("没有任何备份可恢复")
         if (o["yes"] != "true") {
@@ -595,7 +644,9 @@ object YbCli {
 
     private suspend fun pitr(o: Map<String, String>) {
         val store = openStore(o)
-        val engine = engineOf(store, readOnly = false)   // 这两个命令会改数据（切换 CURRENT 指针）
+        // 这两个命令会改数据（切换 CURRENT 指针）→ 需要时间戳 → 在无 CAS 的后端上
+        // 必须有显式同意才能降级（见 engineOf 的说明）
+        val engine = engineOf(store, readOnly = false, allowNonAtomicPointerSwitch = acceptNonAtomic(o))
         val tableName = o["table"] ?: throw CliError("pitr 需要 --table <name>")
         val target = o["to"] ?: throw CliError("pitr 需要 --to \"YYYY-MM-DD HH:MM:SS\"")
         val millis = com.cloudea.yangbase.common.Datum.parseDateTime(target)
@@ -603,7 +654,11 @@ object YbCli {
 
         val t = engine.catalog.allTables().firstOrNull { it.name.equals(tableName, true) }
             ?: throw CliError("表 '$tableName' 不存在")
-        val mgr = com.cloudea.yangbase.txn.SnapshotManager(store, engine)
+        // ⚠️ 开关必须**同时**给 SnapshotManager：切 CURRENT 指针的是它内部的 ManifestStore。
+        // 只给引擎的话，"引擎开好了、备份也做了，restore 却在切指针时报条件写能力不足"
+        val mgr = com.cloudea.yangbase.txn.SnapshotManager(
+            store, engine, allowNonAtomicPointerSwitch = acceptNonAtomic(o),
+        )
 
         val earliest = mgr.earliestRestorableMillis(t)
         println("最早可恢复时刻: ${

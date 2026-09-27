@@ -294,6 +294,21 @@ class WindowTso(
 class ObjectStoreTimestampSource(
     private val store: ObjectStore,
     private val clusterId: String,
+    /**
+     * 后端没有 ETag CAS 时，是否允许走**弱化路径**（无前置条件 PUT + 写后回读校验）。
+     *
+     * 与 manifest 指针切换是**同一个开关**（`--i-accept-nonatomic-pointer-switch`）：
+     * 它们背后是同一件事实——"这个后端没有条件写，而我接受在单写者部署下运行"。
+     * 分开两个开关只会让人只打开其中一个，然后在别处撞上另一处。
+     *
+     * ⚠️ 为什么水位**也能**弱化：CAS 在这里的作用是让多个 CN 的预留互斥。
+     * 单写者部署下这个互斥是空的（没有第二个预留者），而水位真正要保证的是
+     * "重启后不发出比历史更小的号"——那只需要**持久化 + 只增不减**，
+     * 不需要原子性。代价是：万一真的出现了第二个写者，它可能把水位**写低**，
+     * 于是两边发出重复的时间戳。所以回读校验在这里不是可选项：
+     * 它把"默默发重号"变成"当场报错"（见 [reserve]）。
+     */
+    private val allowNonAtomicCas: Boolean = false,
 ) : TimestampSource {
 
     private val watermarkKey = "meta/tso/$clusterId.json"
@@ -314,16 +329,54 @@ class ObjectStoreTimestampSource(
             val current = if (meta == null) 0L else readWatermark()   // 损坏时抛异常，见下
             val base = maxOf(current, atLeast)
             val next = base + span
-            val ok = try {
-                store.put(
-                    watermarkKey, """{"watermark":$next}""".toByteArray(),
-                    if (meta == null) Precondition.MustNotExist else Precondition.MustMatch(meta.etag),
+            val payload = """{"watermark":$next}""".toByteArray()
+            val weak = meta != null && !store.caps.conditionalUpdate
+            // ★ 「没有 CAS」**不等于**「可以降级」：降级必须由部署者**显式同意**
+            // （原则 P6：宁可拒绝服务，也不要悄悄失去互斥）。
+            //
+            // 这个判断必须在这里、而不是靠下面 `put` 抛异常来兜底：走弱化路径时
+            // 我们压根不会发 `If-Match`，于是没有任何一层会因为"没开开关"而报错——
+            // 表现就是**开关没开也照样降级**，一个静默的、无声的失去互斥。
+            if (weak && !allowNonAtomicCas) {
+                throw com.cloudea.yangbase.common.CapabilityNotSupportedException(
+                    "时间戳水位需要 ETag CAS（If-Match），而这个后端没有：key=$watermarkKey。" +
+                        "补救：在**单写者**部署下显式接受降级（--i-accept-nonatomic-pointer-switch），" +
+                        "或改用 --coord-mode ms。",
                 )
+            }
+            val ok = try {
+                when {
+                    // 「仅当不存在时创建」在不支持 CAS 的后端上依然可用（OSS 走 x-oss-forbid-overwrite）
+                    meta == null -> store.put(watermarkKey, payload, Precondition.MustNotExist)
+                    !weak -> store.put(watermarkKey, payload, Precondition.MustMatch(meta.etag))
+                    // ── 弱化路径：与 ManifestStore 同一套路（无前置条件 PUT + 写后回读）
+                    else -> store.put(watermarkKey, payload, null)
+                }
+                // 弱化路径下的回读校验：写进去的不是我们要写的值，
+                // 说明在这两步之间**有另一个预留者**——那么它可能已经发出了
+                // 与我们重叠的时间戳区间。此时唯一安全的动作是**拒绝发号**
+                if (weak && !writtenValueIs(payload)) {
+                    throw SqlException(
+                        MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
+                        "时间戳水位在写入期间被另一个写者覆盖（后端没有 ETag CAS，" +
+                            "已按 --i-accept-nonatomic-pointer-switch 降级）。" +
+                            "这个开关的前提是**单写者部署**——请确认只有一个 CN 在写这个对象存储。",
+                    )
+                }
                 true
             } catch (_: ConcurrentModificationException) {
                 false   // 别人抢先了，重读再来
             } catch (_: PreconditionFailedException) {
                 false
+            } catch (e: com.cloudea.yangbase.common.CapabilityNotSupportedException) {
+                // 后端没有 CAS 且没开开关：给出**补救动作**，而不是让它冒到某条 SQL 上
+                // （真事：以前这条异常是在执行第一条语句时才炸出来的，报的是
+                //  "key=meta/tso/default.json 不支持条件写"，与"我该怎么启动"无关）
+                throw com.cloudea.yangbase.common.CapabilityNotSupportedException(
+                    "时间戳水位需要 ETag CAS（If-Match），而这个后端没有：" +
+                        "key=$watermarkKey。补救：在**单写者**部署下显式接受降级" +
+                        "（--i-accept-nonatomic-pointer-switch），或改用 --coord-mode ms。",
+                )
             }
             if (ok) return TimestampWindow(base, next)
 
@@ -342,6 +395,10 @@ class ObjectStoreTimestampSource(
     }
 
     override suspend fun watermark(): Long = readWatermark()
+
+    /** 回读校验：刚写下去的值是不是还在（弱化路径专用，见 [reserve]）。 */
+    private suspend fun writtenValueIs(expected: ByteArray): Boolean =
+        runCatching { store.get(watermarkKey) }.getOrNull()?.contentEquals(expected) == true
 
     /**
      * 读水位。**损坏时抛异常，绝不静默当成 0**。
@@ -513,12 +570,23 @@ class SingleProcessCoordination(
     clusterId: String = "default",
     /** 一次预取覆盖多少毫秒（见 `WindowTso.batchMillis` 的说明）。 */
     batchMillis: Long = 1_000,
+    /**
+     * 后端没有 ETag CAS 时的显式降级开关（`--i-accept-nonatomic-pointer-switch`）。
+     *
+     * 单进程协调下真正会用到 CAS 的只剩**时间戳水位**一处（租约与行锁都是进程内的），
+     * 但它足以让服务在 OSS 上连第一条语句都执行不了——所以这个开关必须一路传到这儿。
+     */
+    allowNonAtomicCas: Boolean = false,
 ) : CoordinationService {
 
     override val kind = "single"
 
     override val tso: Tso =
-        if (store != null) PersistentTso(store, clusterId, batchMillis = batchMillis) else MonotonicTso()
+        if (store != null) {
+            PersistentTso(store, clusterId, batchMillis = batchMillis, allowNonAtomicCas = allowNonAtomicCas)
+        } else {
+            MonotonicTso()
+        }
 
     override val leases: LeaseProvider = SingleProcessLease
 

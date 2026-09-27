@@ -103,9 +103,13 @@ class PersistentTso(
     clusterId: String,
     batchMillis: Long = 1_000,
     logicalBits: Int = 18,
+    /** 见 [ObjectStoreTimestampSource.allowNonAtomicCas]：后端没有 CAS 时的显式降级开关。 */
+    allowNonAtomicCas: Boolean = false,
 ) : Tso {
 
-    private val inner = WindowTso(ObjectStoreTimestampSource(store, clusterId), logicalBits, batchMillis)
+    private val inner = WindowTso(
+        ObjectStoreTimestampSource(store, clusterId, allowNonAtomicCas), logicalBits, batchMillis,
+    )
 
     override suspend fun next(): CommitTs = inner.next()
 

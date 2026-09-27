@@ -110,9 +110,30 @@ class YangBaseServer(
                 if (config.runMetaService) startInProcessMeta(store)
                 com.cloudea.yangbase.txn.SingleProcessCoordination(
                     config.nodeId, store, batchMillis = batchMillis,
+                    // 单 CN 部署下，这个后端上唯一还需要 CAS 的协调写入是**时间戳水位**。
+                    // 开关没传时它会在第一条语句上明确失败（而不是悄悄发出可能重复的时间戳）
+                    allowNonAtomicCas = config.allowNonAtomicPointerSwitch,
                 )
             }
             "objectstore", "object-store", "object_store" -> {
+                // ★ 这个组合**不可能**成立，而且要在启动时说清楚，别等到第一次抢租约。
+                //
+                // 降级开关（--i-accept-nonatomic-pointer-switch）接受的是"**单写者**部署下
+                // 那些协调写入失去原子性"；而 objectstore 模式的租约与行锁，
+                // 其 CAS **正是用来在多个写者之间互斥的**——把它降级掉，
+                // 得到的不是"弱一点的协调"，而是"没有协调"。所以这里既不能降级，
+                // 也不该在运行期一条条语句地报错
+                if (!store.caps.conditionalUpdate) {
+                    throw IllegalStateException(
+                        "coord-mode=objectstore 需要后端支持 ETag CAS（If-Match），" +
+                            "而当前后端没有（阿里云 OSS 就是这一类）。\n" +
+                            "  · 单 CN 部署 → 用 --coord-mode single（默认）\n" +
+                            "  · 多 CN 部署 → 用 --coord-mode ms\n" +
+                            "  · --i-accept-nonatomic-pointer-switch 在这里帮不上忙：它接受的是" +
+                            "「单写者部署下协调写入失去原子性」，而租约/行锁的 CAS 正是用来" +
+                            "在多个写者之间互斥的。",
+                    )
+                }
                 if (config.runMetaService) startInProcessMeta(store)
                 com.cloudea.yangbase.txn.ObjectStoreCoordination(
                     store = store,
@@ -309,16 +330,31 @@ class YangBaseServer(
             val fatal = probe.findings.filter { it.critical && !it.passed }
                 .filterNot { it.degradable && config.allowNonAtomicPointerSwitch }
             if (fatal.isNotEmpty()) {
+                // ★ 失败的**是哪一类**，决定了该说什么。
+                //
+                // 「连不上」与「条件写不生效」是两回事，给错建议比不给更糟：
+                // 基础读写都失败时（403 密钥、404 桶不存在、DNS、地域不匹配），
+                // 说"本系统建立在条件写之上"是把原因指错了方向——而且此时建议
+                // `--skip-capability-probe` 是**害人的**：跳过探测并不能让 403 变成 200，
+                // 只会让人以为"绕过去了"，然后在第一次真实写入时撞上同样的错。
+                val transport = fatal.filter { it.name == "读写" || it.name == "读己之写" || it.name == "LIST" }
                 throw IllegalStateException(
                     "对象存储后端未通过关键能力探测，拒绝启动。\n" +
                         fatal.joinToString("\n") { "  - ${it.name}: ${it.detail}" } +
-                        "\n本系统的正确性建立在条件写之上；在这种后端上运行会静默损坏数据。\n" +
-                        (if (probe.findings.any { it.degradable && !it.passed })
-                            "若这是**后端如实声明不支持 ETag CAS**（阿里云 OSS 就是这样），" +
-                                "且你接受 manifest 指针切换失去原子性，可加 " +
-                                "--i-accept-nonatomic-pointer-switch（见设计文档 §3.3）。\n"
-                        else "") +
-                        "若只是想做实验，传 --skip-capability-probe 显式跳过。",
+                        if (transport.isNotEmpty()) {
+                            "\n上面这几项失败在**基础读写**上：先解决连接/鉴权/桶，再谈其它。" +
+                                "最常见的四种见用户手册「启动一个阿里云 OSS 实例」下面的指纹表。" +
+                                "\n（此时 --skip-capability-probe 帮不上忙：它跳过的正是这一步的检查，" +
+                                "而问题在更下面一层。）"
+                        } else {
+                            "\n本系统的正确性建立在条件写之上；在这种后端上运行会静默损坏数据。\n" +
+                                (if (probe.findings.any { it.degradable && !it.passed })
+                                    "若这是**后端如实声明不支持 ETag CAS**（阿里云 OSS 就是这样），" +
+                                        "且你接受 manifest 指针切换失去原子性，可加 " +
+                                        "--i-accept-nonatomic-pointer-switch（见设计文档 §3.3）。\n"
+                                else "") +
+                                "若只是想做实验，传 --skip-capability-probe 显式跳过。"
+                        },
                 )
             }
             if (probe.findings.any { it.degradable && !it.passed } && config.allowNonAtomicPointerSwitch) {

@@ -1,5 +1,6 @@
 package com.cloudea.yangbase.objectstore
 
+import com.cloudea.yangbase.common.ObjectStoreException
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -119,6 +120,67 @@ class CapabilityProbeTest {
         assertFalse(
             r.capabilities.conditionalCreate,
             "实测结果必须能推翻厂商/配置的声明——这正是探测存在的意义",
+        )
+    }
+
+    /** 模拟"根本没连上/没鉴权过"的后端：**第一步 PUT 就失败**。 */
+    private class PutFails(private val delegate: ObjectStore, private val failure: Exception) : ObjectStore {
+        override val caps get() = delegate.caps
+        override suspend fun get(key: String, range: ByteRange?) = delegate.get(key, range)
+        override suspend fun put(key: String, data: ByteArray, precondition: Precondition?): ETag =
+            throw failure
+
+        override suspend fun delete(key: String) = delegate.delete(key)
+        override suspend fun list(prefix: String, pageToken: String?, limit: Int) =
+            delegate.list(prefix, pageToken, limit)
+
+        override suspend fun head(key: String) = delegate.head(key)
+    }
+
+    /**
+     * ★ **基础读写失败时，报告里必须有原因。**
+     *
+     * 真实场景（2026-09-27，阿里云 OSS）：`--s3-bucket my-yangbase` 起不来，
+     * 报告只有一行 `读写=✗` 加上五项"前置步骤失败"——**一个字的线索都没有**，
+     * 因为第一步把异常 `catch (_: Exception)` 吞掉了，而其余五项都以它为前置。
+     * 使用者拿到的信息量是零：不知道是密钥、桶名、地域还是网络。
+     *
+     * 这类"报错了但说不清为什么"的失败，排查成本全落在使用者身上，而且往往
+     * 指向错误的方向（去改 SQL、去查磁盘）。所以：**失败项必须带上异常链**。
+     */
+    @Test
+    fun `基础读写失败时报告必须带上原因链`() = runBlocking {
+        val cause = java.net.UnknownHostException("oss-cn-hangzhou.aliyuncs.com")
+        val failure = ObjectStoreException(
+            "PUT .yb-probe/x/probe 失败: 403 InvalidAccessKeyId",
+            java.io.UncheckedIOException("连接被重置", cause),
+        )
+        val r = CapabilityProbe.probe(PutFails(MemoryObjectStore(), failure))
+
+        assertFalse(r.allCriticalPassed, "前置失败时不能判为通过")
+        val basic = r.findings.first { it.name == "读写" }
+        assertFalse(basic.passed)
+        assertTrue(
+            basic.detail.contains("InvalidAccessKeyId"),
+            "报告必须带上后端给的错误（403/InvalidAccessKeyId 之类），实际：${basic.detail}",
+        )
+        assertTrue(
+            basic.detail.contains("PUT"),
+            "要说清是**哪一侧**失败的：'桶不存在'（PUT 就挂）与'写进去了却读不到'（GET 才挂）" +
+                "排查方向完全相反，合成一句话等于没有信息。实际：${basic.detail}",
+        )
+        assertTrue(
+            basic.detail.contains("UnknownHostException"),
+            "最内层原因（网络层）不能被丢掉——它是唯一能区分「密钥错」与「域名不通」的线索，实际：${basic.detail}",
+        )
+        // report() 是启动时真正打印出去的那一行，它同样要带上
+        assertTrue(r.report().contains("InvalidAccessKeyId"), "启动日志里也要有：${r.report()}")
+
+        // 其余各项仍然如实报"前置步骤失败"——它们**确实**没被验证过，
+        // 不能因为第一步挂了就把它们标成通过
+        assertTrue(
+            r.findings.filter { !it.passed }.size >= 5,
+            "以第一步为前置的几项都应如实报未通过，实际：${r.findings.map { it.name to it.passed }}",
         )
     }
 

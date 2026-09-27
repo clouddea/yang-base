@@ -61,6 +61,33 @@ object CapabilityProbe {
     )
 
     /**
+     * 把异常**连同原因链**压成一行，供 [Finding.detail] 使用。
+     *
+     * 为什么不能只写"失败"或只写最外层的类名：探测失败的第一现场是**网络与鉴权**
+     * （403 密钥不对、404 桶不存在、跨地域、DNS 不通），而这些信息全在异常里。
+     * 曾经 `读写` 这一项写的是 `catch (_: Exception) { basicOk = false }`，
+     * 于是最根本的那一项失败时报告上没有**一个字的线索**——其它五项还全部显示
+     * "前置步骤失败"（它们都以它为前置），整份报告退化成一堆 ✗。
+     * 使用者拿到的是"起不来"，而答案（那个 403/404 是什么）被我们自己丢掉了。
+     *
+     * 同样重要：S3 SDK 会把真实原因包在**第二层**（`S3Exception` 的 message 里没有
+     * 连接层的错，`UncheckedIOException` 的 cause 才是），所以这里整条链都留着。
+     */
+    internal fun why(e: Throwable): String {
+        val sb = StringBuilder()
+        var cur: Throwable? = e
+        var depth = 0
+        while (cur != null && depth < 4) {
+            if (depth > 0) sb.append(" ← ")
+            sb.append(cur::class.simpleName).append(": ").append(cur.message ?: "(无 message)")
+            cur = cur.cause?.takeIf { it !== cur }
+            depth++
+        }
+        if (cur != null) sb.append(" ← …")
+        return sb.toString()
+    }
+
+    /**
      * 实测后端能力。
      *
      * @param base 已构建好的 store；探测只用它，不改它的配置
@@ -77,18 +104,41 @@ object CapabilityProbe {
         // ── 1. 基本读写 ────────────────────────────────────────────
         val payload = "yangbase-probe".toByteArray()
         var basicOk = true
+        // ★ 这一项的**原因必须留下**：它是所有其它项的前置，失败时其余各项只会显示
+        // "前置步骤失败"。把异常吞掉的代价不是"少一行日志"，而是把"301 桶不在这个
+        // 地域 / 403 密钥不对 / 404 桶不存在 / 连接不通"这类**唯一**的线索丢掉，
+        // 留下一句"起不来"
+        var basicDetail = "PUT 后 GET 应返回相同内容"
+        // ★ PUT 与 GET 分开报：合在一起时，"桶不存在"（PUT 就挂）与"写进去了但读不到"
+        // （GET 才挂）会给出**同一句话**，而这两者的排查方向完全相反
         try {
             store.put(k, payload)
-            val back = store.get(k)
-            basicOk = back.contentEquals(payload)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             basicOk = false
+            basicDetail = "**写入（PUT）就失败了**——后面几项因此都会显示「前置步骤失败」：${why(e)}\n" +
+                "  · 404/NoSuchBucket → 桶不存在（本服务**不会**替你建桶，请先在控制台建好）\n" +
+                "  · 403/InvalidAccessKeyId → 密钥不对或已轮换\n" +
+                "  · 403/SecondLevelDomainForbidden → 少了 --s3-path-style false\n" +
+                "  · 403 提到 endpoint/地域 → --s3-region 与桶所在地域不一致"
         }
-        findings += Finding("读写", basicOk, "PUT 后 GET 应返回相同内容", critical = true)
+        if (basicOk) {
+            try {
+                val back = store.get(k)
+                basicOk = back.contentEquals(payload)
+                if (!basicOk) basicDetail = "PUT 成功，但 GET 回来的内容不一致（后端写坏了或做了转换）"
+            } catch (e: Exception) {
+                basicOk = false
+                basicDetail = "**PUT 成功、紧接着的 GET 却失败了**：${why(e)}\n" +
+                    "  写着成功、立刻读不到，说明写入没有落到读的那一侧（不同桶/不同地域/弱一致），" +
+                    "这种后端上 MVCC 的可见性论证不成立"
+            }
+        }
+        findings += Finding("读写", basicOk, basicDetail, critical = true)
 
         // ── 2. 读己之写（强一致读）────────────────────────────────
         // 弱一致的后端上，刚写完立刻读可能读不到——那会让 MVCC 的可见性论证失效
         var rawOk = false
+        var rawDetail = "覆盖写后立刻读必须返回新值"
         if (basicOk) {
             try {
                 // 连续覆盖写并立刻读，弱一致后端有一定概率读到旧值
@@ -99,11 +149,13 @@ object CapabilityProbe {
                     if (!store.get(k).contentEquals(v)) { consistent = false; break }
                 }
                 rawOk = consistent
-            } catch (_: Exception) {
+                if (!consistent) rawDetail = "刚写完立刻读到了旧值——这是**弱一致后端**，MVCC 的可见性论证不成立"
+            } catch (e: Exception) {
                 rawOk = false
+                rawDetail = "覆盖写/回读时报错：${why(e)}"
             }
         }
-        findings += Finding("读己之写", rawOk, "覆盖写后立刻读必须返回新值", critical = true)
+        findings += Finding("读己之写", rawOk, rawDetail, critical = true)
 
         // ── 3. 条件创建（If-None-Match: *）────────────────────────
         // 关键判定：对**已存在**的对象做条件创建，必须失败。
@@ -126,7 +178,7 @@ object CapabilityProbe {
             } catch (e: Exception) {
                 // 其他错误码（如 404/501）说明未实现条件写
                 condCreate = false
-                condCreateDetail = "非预期错误: ${e::class.simpleName} ${e.message}"
+                condCreateDetail = "非预期错误: ${why(e)}"
             }
         }
         findings += Finding("条件创建 If-None-Match", condCreate, condCreateDetail, critical = true)
@@ -166,7 +218,7 @@ object CapabilityProbe {
                 condUpdateDetail = "后端如实声明不支持 If-Match（无 ETag CAS）——" +
                     "manifest 指针切换需要显式接受非原子降级（--i-accept-nonatomic-pointer-switch）"
             } catch (e: Exception) {
-                condUpdateDetail = "非预期错误: ${e::class.simpleName} ${e.message}"
+                condUpdateDetail = "非预期错误: ${why(e)}"
             }
         }
         findings += Finding(
@@ -191,8 +243,7 @@ object CapabilityProbe {
                 // 带上 message 与最内层原因：只写一个异常类名会让排查
                 // 「这个后端到底哪里不支持」变成猜谜（真实的例子：
                 // 阿里云 OSS 上报的是 `UncheckedIOException`，而 OSS 本身是支持 Range 的）
-                rangeDetail = "不支持: ${e::class.simpleName} ${e.message}" +
-                    (e.cause?.let { " ← ${it::class.simpleName}: ${it.message}" } ?: "")
+                rangeDetail = "不支持: ${why(e)}"
             }
         }
         findings += Finding("Range 读", rangeOk, rangeDetail, critical = false)
@@ -221,7 +272,7 @@ object CapabilityProbe {
                     else -> "强一致且有序，分页正确"
                 }
             } catch (e: Exception) {
-                listDetail = "不支持: ${e::class.simpleName} ${e.message}"
+                listDetail = "不支持: ${why(e)}"
             }
         }
         findings += Finding("LIST", listOk, listDetail, critical = true)

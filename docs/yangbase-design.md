@@ -395,6 +395,11 @@ sealed interface Precondition {
 >  - 原子创建改用 `x-oss-forbid-overwrite`（`AtomicCreateStyle.FORBID_OVERWRITE`）；
 >  - manifest 指针在无 CAS 时退化为「无前置条件 PUT + 写后回读校验」，
 >    **必须**显式传 `--i-accept-nonatomic-pointer-switch` 才会启用（默认拒绝启动）；
+>    同一个开关覆盖**全部三处**需要 CAS 的协调写入——manifest 指针 · 时间戳水位
+>    （`meta/tso/<cluster>.json`）· 自增段水位（`auto_inc/`）。后两处是 2026-09-27 补上的：
+>    它们当时**没有**接上这个开关，于是单 CN 部署在 OSS 上"能启动、探测全过，
+>    但第一条需要时间戳的语句就失败"，而且只有桶里**已经存在**水位对象时才会踩到
+>    （= 重启之后），空桶跑测试发现不了；
 >  - 能力探测把「**如实声明**不支持 CAS」与「**声称支持却静默忽略**」分开：
 >    前者可降级，后者（GCS 互操作层）永远拒绝启动；
 >  - 接管分片时做一次**孤儿快照审计**，把「写了却没成为 current」的 manifest 报出来。

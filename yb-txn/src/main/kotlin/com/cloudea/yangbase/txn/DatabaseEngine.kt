@@ -116,7 +116,24 @@ class DatabaseEngine(
      * **每个引擎一份**，不是每个会话一份：段是本地缓存，多开几份会各自去领段，
      * 白白多花对象存储请求，还把可用的 id 摊得更散。
      */
-    val autoIncrement: AutoIncAllocator by lazy { AutoIncAllocator(store) }
+    val autoIncrement: AutoIncAllocator by lazy {
+        // ★ 降级只在**单写者**部署下成立——判据不能只是"用户开了开关"。
+        //
+        // 自增领段的互斥**完全依赖**这一次 CAS：它没有走 MS（实现是 §4.7 的
+        // "对象存储协调"那一档，见 AutoInc 的类注释）。所以在 `ms` 模式下即使
+        // 后端没有 CAS，也不能降级：两个 CN 会读到同一个水位、写入**同一个新值**、
+        // 回读**也都能通过**（两边写下的内容一模一样），然后各自从同一段里发号
+        // ⇒ 重复主键、后写的行静默覆盖先写的。
+        //
+        // 所以这里按协调模式收口：只有 `single`（部署上保证只有一个写者）才允许降级。
+        // `ms` 模式下的正确做法是把领段交给 MS 串行化——那是 §11.4 的后续工作，
+        // 在那之前这条路径**明确失败**（不可用，但不是数据损坏）。
+        AutoIncAllocator(
+            store,
+            allowNonAtomicCas = allowNonAtomicPointerSwitch && coord.kind == "single",
+            coordinationMode = coord.kind,
+        )
+    }
 
     /** 在线索引构建（设计文档 §8.7）。每个引擎一份。 */
     val onlineIndexBuilder: OnlineIndexBuilder by lazy { OnlineIndexBuilder(this) }
@@ -125,7 +142,10 @@ class DatabaseEngine(
     private val gc = GarbageCollector(store)
     /** 装配好的协调实现（日志与 `SHOW VARIABLES` 用它报告当前模式）。 */
     val coord: CoordinationService by lazy {
-        coordination ?: SingleProcessCoordination(nodeId, store, clusterId = "default")
+        coordination ?: SingleProcessCoordination(
+            nodeId, store, clusterId = "default",
+            allowNonAtomicCas = allowNonAtomicPointerSwitch,
+        )
     }
 
     val leaseProvider: com.cloudea.yangbase.storage.LeaseProvider get() = coord.leases

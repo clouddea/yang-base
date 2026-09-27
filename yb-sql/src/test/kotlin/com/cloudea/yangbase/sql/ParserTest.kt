@@ -26,6 +26,15 @@ class ParserTest {
 
     private fun parseSelect(sql: String) = assertIs<SelectStmt>(parse(sql))
 
+    @Test
+    fun `字符串引号只在 SELECT 列别名位置作为别名`() {
+        val s = parseSelect("SELECT id AS 'display name', body 'it''s text' FROM t ORDER BY 'display name'")
+        assertEquals("display name", assertIs<SelectItem.Field>(s.projections[0]).alias)
+        assertEquals("it's text", assertIs<SelectItem.Field>(s.projections[1]).alias)
+        assertEquals(Literal(Datum.Str("display name")), s.orderBy.single().expr)
+        assertFailsWith<SqlException> { parse("SELECT id FROM 't'") }
+    }
+
     // ── 比较运算符（曾经的静默错误所在）────────────────────────────
 
     @Test

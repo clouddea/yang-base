@@ -212,4 +212,53 @@ class S3FailureClassificationTest {
 
         assertTrue(e.retryable, "网络中断是瞬时故障，必须可重试：${e.message}")
     }
+
+    /**
+     * ★ **「桶不存在」绝不能报成「对象不存在」。**
+     *
+     * 两者都是 404，但一个是**配置错误**（桶名写错/桶没建/地域不对），
+     * 另一个是**正常状态**（恢复路径靠"这个 WAL 对象没有"来判断无事可做、
+     * 目录靠它判断"这张表没有"）。
+     *
+     * 混起来的后果是静默的，也正是本项目最不能接受的那一类：桶名写错时，
+     * 目录加载会读成"这个库一张表都没有"，GC 读成"没有东西要删"，
+     * 崩溃恢复读成"没有 WAL 要重放"——系统带着**一个空世界**继续跑。
+     *
+     * 真事（2026-09-27）：`--s3-bucket my-yangbase`（桶没建）启动失败，
+     * 报的是 `ObjectNotFoundException: 对象不存在: .yb-probe/…/probe`——
+     * 指着探测用的临时对象，而问题在桶名上。
+     */
+    @Test
+    fun `桶不存在必须报成配置错误而不是对象不存在`() = runBlocking {
+        val missing = S3ObjectStore.create(
+            bucket = "yangbase-missing-bucket",
+            endpoint = s3.endpoint,
+            region = "us-east-1",
+            accessKey = "t", secretKey = "t",
+            caps = ObjectStoreCapabilities.FULL,
+        )
+        try {
+            for ((name, op) in listOf<Pair<String, suspend () -> Any?>>(
+                "get" to { missing.get("k") },
+                "put" to { missing.put("k", "v".toByteArray()) },
+                "list" to { missing.list("") },
+            )) {
+                val e = assertFailsWith<ObjectStoreException>("$name 必须报配置错误") { op() }
+                assertTrue(
+                    e.message!!.contains("桶不存在"),
+                    "$name 的错误必须点名**桶**（而不是「对象不存在」），实际：${e.message}",
+                )
+                assertFalse(e.retryable, "$name: 配置错误重试一万次也是同样的结果，不能标成可重试")
+            }
+        } finally {
+            missing.close()
+        }
+    }
+
+    /** 反过来：正常的"对象不存在"仍然是 [ObjectNotFoundException]，恢复路径靠它判断无事可做。 */
+    @Test
+    fun `对象真的不存在时仍是 ObjectNotFoundException`() = runBlocking {
+        assertFailsWith<ObjectNotFoundException> { raw.get("never-written-key") }
+        assertFailsWith<ObjectNotFoundException> { raw.head("never-written-key") }
+    }
 }

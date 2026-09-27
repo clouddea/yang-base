@@ -43,9 +43,19 @@ import com.cloudea.yangbase.storage.ManifestStore
 class SnapshotManager(
     private val store: ObjectStore,
     private val engine: DatabaseEngine,
+    /**
+     * 后端没有 ETag CAS 时是否允许降级——与 `DatabaseEngine` /
+     * `--i-accept-nonatomic-pointer-switch` 是**同一个开关**。
+     *
+     * ⚠️ 这里**必须自己接上**，不能只给引擎开：恢复真正动的是 `manifest/CURRENT`，
+     * 而切换指针的是本类内部这个 `ManifestStore`。只把开关传给引擎的后果是
+     * 「引擎开好了、备份也做了，`restore --yes` 却在切换指针时报
+     * `CapabilityNotSupportedException`」——一个与"我要恢复"毫无关系的错误。
+     */
+    private val allowNonAtomicPointerSwitch: Boolean = false,
 ) {
 
-    private val manifestStore = ManifestStore(store)
+    private val manifestStore = ManifestStore(store, allowNonAtomicPointerSwitch)
 
     /**
      * 一份备份清单。

@@ -27,6 +27,7 @@ import software.amazon.awssdk.services.s3.model.HeadObjectRequest
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException
 import software.amazon.awssdk.services.s3.model.PutObjectRequest
+import software.amazon.awssdk.services.s3.model.NoSuchBucketException
 import software.amazon.awssdk.services.s3.model.S3Exception
 import software.amazon.awssdk.services.s3.model.UploadPartCopyRequest
 import java.net.URI
@@ -65,8 +66,13 @@ class S3ObjectStore(
             val resp: ResponseBytes<*> = client.getObjectAsBytes(req)
             resp.asByteArray()
         } catch (e: NoSuchKeyException) {
+            // ⚠️ GET 的 404 被 SDK **一律**建成 `NoSuchKeyException`（它按状态码建模），
+            // 桶不存在也是 404——所以这里不能直接当成"对象不存在"，
+            // 必须再看一眼错误码（见 [isNoSuchBucket]）
+            if (isNoSuchBucket(e)) noSuchBucket(key, e)
             throw ObjectNotFoundException(key)
         } catch (e: S3Exception) {
+            if (isNoSuchBucket(e)) noSuchBucket(key, e)
             if (e.statusCode() == 404) throw ObjectNotFoundException(key)
             throw ObjectStoreException(
                 "GET $key 失败: ${e.statusCode()} ${e.awsErrorDetails()?.errorMessage()}",
@@ -147,7 +153,9 @@ class S3ObjectStore(
                     // 409 = 并发冲突 → 条件结论未知，可退避重试（§3.3.1）
                     e.statusCode() == 409 ->
                         throw ConcurrentModificationException("条件写并发冲突: key=$key", e)
-                    e.statusCode() == 404 -> throw ObjectNotFoundException(key)
+                    // 404 在 PUT 上**几乎总是**桶不存在（对象不存在不会让 PUT 失败）
+                    e.statusCode() == 404 ->
+                        if (isNoSuchBucket(e)) noSuchBucket(key, e) else throw ObjectNotFoundException(key)
                     // 5xx / 429 / 408 是瞬时故障，重发可能成功 → 标成可重试
                     else -> throw ObjectStoreException(
                         "PUT $key 失败: ${e.statusCode()} ${e.awsErrorDetails()?.errorMessage()}".trim(),
@@ -170,6 +178,10 @@ class S3ObjectStore(
         } catch (_: NoSuchKeyException) {
             false
         } catch (e: S3Exception) {
+            // ⚠️ 这里返回 false 的语义是"对象不存在，没什么可删的"。
+            // 桶不存在时若也返回 false，GC / DROP TABLE / 清理路径会把
+            // **一次配置错误**读成"本来就没有东西"，然后一声不响地继续
+            if (isNoSuchBucket(e)) noSuchBucket(key, e)
             if (e.statusCode() == 404) false
             else throw ObjectStoreException("HEAD $key 失败: ${e.statusCode()}", e, retryable = isTransient(e))
         } catch (e: SdkException) {
@@ -210,6 +222,7 @@ class S3ObjectStore(
                     resp.contents().mapNotNull { o -> o.size()?.let { o.key() to it } }.toMap(),
                 )
             } catch (e: S3Exception) {
+                if (isNoSuchBucket(e)) noSuchBucket(prefix, e)
                 throw ObjectStoreException("LIST $prefix 失败: ${e.statusCode()}", e, retryable = isTransient(e))
             } catch (e: SdkException) {
                 throw ObjectStoreException("LIST $prefix 失败: ${e.message}", e, retryable = isTransient(e))
@@ -225,6 +238,7 @@ class S3ObjectStore(
         } catch (_: NoSuchKeyException) {
             throw ObjectNotFoundException(key)
         } catch (e: S3Exception) {
+            if (isNoSuchBucket(e)) noSuchBucket(key, e)
             if (e.statusCode() == 404) throw ObjectNotFoundException(key)
             throw ObjectStoreException("HEAD $key 失败: ${e.statusCode()}", e, retryable = isTransient(e))
         } catch (e: SdkException) {
@@ -234,6 +248,41 @@ class S3ObjectStore(
         }
     }
 
+
+    /**
+     * 404 有**两种**，含义完全不同，绝不能混成一个：
+     *
+     * | 错误码 | 含义 | 属于 |
+     * |---|---|---|
+     * | `NoSuchKey` | 这个**对象**不存在 | **正常状态**——恢复路径正是靠它判断"这个 WAL 对象没有"、目录靠它判断"这张表没有" |
+     * | `NoSuchBucket` | 这个**桶**不存在 | **配置错误**——桶名写错、桶没建、地域不对 |
+     *
+     * 混起来的后果是静默的，而且正是本项目最不能接受的那一类：把"桶不存在"当成
+     * "对象不存在"返回，目录会读成"这个库一张表都没有"、GC 会读成"没有东西要删"、
+     * 崩溃恢复会读成"没有 WAL 要重放"——系统带着一个**空世界**继续跑，
+     * 直到某个写路径才报错，而那时错误离原因已经很远了。
+     *
+     * （真事，2026-09-27：`--s3-bucket` 填了一个不存在的桶，启动时报的是
+     * `ObjectNotFoundException: 对象不存在: .yb-probe/…/probe`——它指着探测用的那个
+     * 临时对象，而真正的问题在桶名上。SDK 的 `NoSuchBucketException` 是"建模过的"
+     * 异常，但某些 S3 兼容后端（含 OSS）不一定会走到那个类型，所以错误码也要看。）
+     *
+     * ⚠️ 判据依赖**响应体**里的 `<Code>`，而 `HEAD` 没有响应体（S3/OSS 都不返回）——
+     * 所以对 [head] 与 [delete] 里的那次 HEAD，它在真实后端上多半不会生效，
+     * 那里仍然按"对象不存在"处理。真正兜住"桶写错了"的是有响应体的
+     * [get] / [put] / [list]（目录加载、写入、恢复列举都要走它们）。
+     */
+    private fun isNoSuchBucket(e: S3Exception): Boolean =
+        e is NoSuchBucketException || e.awsErrorDetails()?.errorCode() == "NoSuchBucket"
+
+    private fun noSuchBucket(key: String, e: S3Exception): Nothing = throw ObjectStoreException(
+        "桶不存在: '$bucket'（操作的是 key=$key）。请检查：--s3-bucket 是否写对 · " +
+            "桶是否已在控制台/ossutil 里创建（**本服务不会替你建桶**）· " +
+            "--s3-region 是否与桶所在地域一致",
+        e,
+        // 配置错误重试一万次也是同样的结果，标成可重试只会把它伪装成"后端在抖"
+        retryable = false,
+    )
 
     /**
      * 把「响应体读取期间的 IO 失败」翻译成本层的错误类型。
@@ -368,6 +417,28 @@ class S3ObjectStore(
                         .build()
                 )
             if (endpoint != null) builder.endpointOverride(URI.create(endpoint))
+            // ★ 密钥的**空串**要在这里挡住，不能等到签名失败。
+            //
+            // `--s3-access-key $AK` 里的 `$AK` 没在当前 shell 里导出时，shell 会
+            // **安安静静地传一个空参数**：命令行看起来完全正确，错误却要到能力探测
+            // 阶段才以「403 / InvalidAccessKeyId」的形式冒出来——那条错误指向密钥
+            // 内容不对，而不是"你的变量是空的"，排查会从错误的方向开始。
+            // （`null` 不一样：那表示"走默认凭据链"，在 ECS 上配合实例角色是正常用法。）
+            if (accessKey?.isBlank() == true || secretKey?.isBlank() == true) {
+                throw IllegalArgumentException(
+                    "S3 密钥是空串：--s3-access-key / --s3-secret-key 收到了空值。" +
+                        "最常见的原因是它们来自环境变量而该变量没有导出" +
+                        "（`--s3-access-key \$AK` 在 \$AK 为空时会传一个**空参数**，命令行看起来完全正常）。" +
+                        "先确认一下：echo \"len(\$AK)=\${#AK}\"。若本意是用实例角色/默认凭据链，请两个都不传。",
+                )
+            }
+            if ((accessKey == null) != (secretKey == null)) {
+                throw IllegalArgumentException(
+                    "S3 密钥只给了一半：accessKey=${if (accessKey != null) "已给" else "未给"} " +
+                        "secretKey=${if (secretKey != null) "已给" else "未给"}。" +
+                        "两者要么都给，要么都不给（都不给 = 走实例角色/环境变量等默认凭据链）",
+                )
+            }
             if (accessKey != null && secretKey != null) {
                 builder.credentialsProvider(
                     StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secretKey))

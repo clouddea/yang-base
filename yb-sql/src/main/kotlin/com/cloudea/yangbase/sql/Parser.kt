@@ -1052,7 +1052,10 @@ class Parser(private val tokens: List<Token>) {
             else {
                 val e = parseExpr()
                 var alias: String? = null
-                if (acceptKeyword("AS")) alias = ident()
+                // MySQL 允许 SELECT 列别名使用字符串引号（Workbench 的元数据查询会用到）。
+                // 仅在别名位置接受，表名/列引用仍按标识符解析。
+                if (acceptKeyword("AS")) alias = if (peek().type == TokenType.STRING) next().text else ident()
+                else if (peek().type == TokenType.STRING) alias = next().text
                 else if (peek().type == TokenType.IDENT && !isReservedClause(peek().text)) alias = ident()
                 items.add(SelectItem.Field(e, alias))
             }

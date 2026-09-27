@@ -71,6 +71,23 @@ class AutoIncAllocator(
      * 所以这里明摆着往大的方向选。
      */
     private val segmentSize: Long = 1000L,
+    /**
+     * 后端没有 ETag CAS 时是否允许走弱化路径（无前置条件 PUT + 写后回读）。
+     *
+     * 与 manifest 指针切换、时间戳水位是**同一个开关**
+     * （`--i-accept-nonatomic-pointer-switch`）——它们背后是同一件事实：
+     * "这个后端没有条件写，而我接受在单写者部署下运行"。
+     *
+     * ⚠️ 这里比另外两处更危险一点：水位被写**低**会让两个写者发出**相同的 id**。
+     * 所以弱化路径下回读校验失败时不是重试，而是**直接拒绝**——
+     * 宁可让这条 INSERT 失败，也不要静默地发出可能重复的主键。
+     */
+    private val allowNonAtomicCas: Boolean = false,
+    /**
+     * 当前的协调模式（`single` / `objectstore` / `ms`）。**只用来把拒绝信息说清楚**：
+     * "这个开关在这里为什么不适用"必须能回答，否则使用者只会反复检查自己有没有传开关。
+     */
+    private val coordinationMode: String = "single",
 ) {
 
     /**
@@ -170,7 +187,7 @@ class AutoIncAllocator(
             }
             if (atLeast <= base) return          // 已经够高，不必写
             try {
-                store.put(key, atLeast.toString().toByteArray(), preconditionFor(cur))
+                writeWatermark(key, atLeast, cur)
                 return
             } catch (_: ConcurrentModificationException) {
                 // 有人抢先了，重读
@@ -210,7 +227,7 @@ class AutoIncAllocator(
             }
             val end = base + segmentSize
             try {
-                store.put(key, end.toString().toByteArray(), preconditionFor(cur))
+                writeWatermark(key, end, cur)
                 // 水位 = end（已发出的最大值），本段可发 (base, end]
                 return Block(AtomicLong(base + 1), end + 1)
             } catch (_: ConcurrentModificationException) {
@@ -243,8 +260,52 @@ class AutoIncAllocator(
         return v to meta.etag
     }
 
-    private fun preconditionFor(cur: Pair<Long, ETag>?): Precondition =
-        if (cur == null) Precondition.MustNotExist else Precondition.MustMatch(cur.second)
+    private fun preconditionFor(cur: Pair<Long, ETag>?): Precondition? = when {
+        // 「仅当不存在时创建」在不支持 CAS 的后端上依然可用（OSS 走 x-oss-forbid-overwrite）
+        cur == null -> Precondition.MustNotExist
+        store.caps.conditionalUpdate -> Precondition.MustMatch(cur.second)
+        // ── 弱化路径：后端没有 ETag CAS，且调用方已显式同意（见 allowNonAtomicCas）──
+        else -> null
+    }
+
+    /**
+     * 写一次水位。**没有 CAS 的后端上必须显式同意才降级**，并且写后回读。
+     *
+     * 回读不是为了"更保险"，而是把「两个写者互相覆盖水位」这件**静默**的事
+     * 变成一次明确的失败：真发生了的话，两边已经可能发出了重叠的 id 段。
+     */
+    private suspend fun writeWatermark(key: String, value: Long, cur: Pair<Long, ETag>?) {
+        val bytes = value.toString().toByteArray()
+        val weak = cur != null && !store.caps.conditionalUpdate
+        if (weak && !allowNonAtomicCas) {
+            // 拒绝的理由分两种，必须分开说：**没开开关**与**开了也不能开**
+            // （多 CN 下这个降级根本不成立——见 DatabaseEngine 里 autoIncrement 的注释）
+            val why = if (coordinationMode == "single") {
+                "补救：在**单写者**部署下显式接受降级（--i-accept-nonatomic-pointer-switch）。"
+            } else {
+                "本部署是 --coord-mode $coordinationMode（可能有多个 CN），而自增领段的互斥" +
+                    "**完全依赖**这次 CAS，降级会让两个 CN 领到同一段、发出重复的主键——" +
+                    "所以这里不能降级。可选：改用有 ETag CAS 的后端、改用 --coord-mode single（单 CN）、" +
+                    "或不用 AUTO_INCREMENT（显式给主键）。"
+            }
+            throw com.cloudea.yangbase.common.CapabilityNotSupportedException(
+                "自增水位需要 ETag CAS（If-Match），而这个后端没有：key=$key。$why",
+            )
+        }
+        store.put(key, bytes, preconditionFor(cur))
+        if (weak) {
+            val back = runCatching { store.get(key) }.getOrNull()
+            if (back == null || !back.contentEquals(bytes)) {
+                throw SqlException(
+                    MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
+                    "自增水位在写入期间被另一个写者覆盖（后端没有 ETag CAS，已按 " +
+                        "--i-accept-nonatomic-pointer-switch 降级）：key=$key。" +
+                        "该开关的前提是**单写者部署**——两个写者可能已经发出相同的 id，" +
+                        "所以这条写入被拒绝而不是重试。",
+                )
+            }
+        }
+    }
 
     /**
      * 清掉本地的段缓存。

@@ -154,6 +154,108 @@ class OssCompatibilityTest {
     }
 
     /**
+     * ★ **桶里已经有时戳水位时，`single` 模式也必须能跑**（2026-09-27 真实故障的回归用例）。
+     *
+     * 真事：在 OSS 上启动 `--coord-mode single`，服务端起来了、探测也过了，
+     * 但**第一条语句**就炸：
+     * ```
+     * CapabilityNotSupportedException: 后端不支持所需的条件写能力
+     *   （precondition=MustMatch(etag="4448…")）key=meta/tso/default.json
+     * ```
+     * 原因：`single` 模式的 TSO 把水位持久化在 `meta/tso/<cluster>.json`，
+     * 续期时用 `If-Match`（CAS）——而 OSS 没有 CAS。
+     *
+     * **为什么 2026-09-25 的"OSS 实测通过"没发现**：那些用例每次都用**空桶**
+     * （夹具启动时清桶），于是水位对象不存在 → 走的是 `If-None-Match`
+     * （OSS 用 `x-oss-forbid-overwrite` 支持它）→ 一路 ✓。
+     * 只有**水位对象已经存在**时才会走到 `MustMatch`：也就是第二次预留，
+     * 或者"桶里留着上一次运行的水位"。测试里靠**预置水位对象**如实复现。
+     *
+     * 教训与「内存后端上全绿 ≠ 没问题」是同一条：**夹具的清桶动作把最关键的那条路径藏起来了**。
+     */
+    @Test
+    fun `桶里已有时戳水位时 OSS 模式下也能执行语句`() = runBlocking {
+        // 预置水位对象 = 这个桶被用过（或上一次运行留下的）
+        store.put("meta/tso/default.json", """{"watermark":123456}""".toByteArray())
+        assertEquals(1, s3.requestCount("PUT"))
+
+        server = YangBaseServer.forTesting(store = store, port = 0, allowNonAtomicPointerSwitch = true)
+        server.start()
+        port = server.boundPort
+        Class.forName("com.mysql.cj.jdbc.Driver")
+
+        DriverManager.getConnection(
+            "jdbc:mysql://127.0.0.1:$port/ossdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
+            "root", "",
+        ).use { c ->
+            c.createStatement().use { s: Statement ->
+                s.execute("CREATE DATABASE IF NOT EXISTS ossdb")
+                s.execute("USE ossdb")
+                s.execute("DROP TABLE IF EXISTS t_tso")
+                s.execute("CREATE TABLE t_tso (id BIGINT NOT NULL, v VARCHAR(8), PRIMARY KEY (id))")
+                // 写入要 commit_ts → 必须有可用的时间戳水位
+                assertEquals(2, s.executeUpdate("INSERT INTO t_tso VALUES (1,'a'),(2,'b')"))
+            }
+            c.createStatement().use { s ->
+                s.executeQuery("SELECT COUNT(*) FROM t_tso").use { rs ->
+                    rs.next()
+                    assertEquals(2L, rs.getLong(1))
+                }
+            }
+        }
+
+        // 水位必须**只增不减**：降级的是原子性，不是单调性
+        val after = String(store.get("meta/tso/default.json"))
+        val wm = Regex(""""watermark"\s*:\s*(\d+)""").find(after)!!.groupValues[1].toLong()
+        assertTrue(wm > 123456, "水位只能往前推，实际 $wm")
+    }
+
+    /**
+     * ★ **自增段的第二次领取**也必须能在没有 CAS 的后端上跑。
+     *
+     * 与时间戳水位是同一类缺陷（`If-Match` 写水位），但触发点更晚：
+     * 只有本地段用完、需要**再领一段**时才会写第二次。段很小的时候它马上就会发生——
+     * 用 `--auto-inc-segment-size` 之类的默认值（1000）在测试里等不出来，
+     * 所以这里直接把段调小再插入。
+     */
+    @Test
+    fun `OSS 模式下自增段可以领第二段`() {
+        server = YangBaseServer.forTesting(store = store, port = 0, allowNonAtomicPointerSwitch = true)
+        server.start()
+        port = server.boundPort
+        Class.forName("com.mysql.cj.jdbc.Driver")
+
+        DriverManager.getConnection(
+            "jdbc:mysql://127.0.0.1:$port/ossdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
+            "root", "",
+        ).use { c ->
+            c.createStatement().use { s: Statement ->
+                s.execute("CREATE DATABASE IF NOT EXISTS ossdb")
+                s.execute("USE ossdb")
+                s.execute("DROP TABLE IF EXISTS t_ai")
+                s.execute(
+                    "CREATE TABLE t_ai (id BIGINT NOT NULL AUTO_INCREMENT, v VARCHAR(8), PRIMARY KEY (id))",
+                )
+                // 直接把本地已领的段作废：下一次插入必然要重新领段 → 走弱化路径写水位
+                runBlocking { server.engine.autoIncrement.invalidate() }
+                s.execute("INSERT INTO t_ai (v) VALUES ('a'),('b'),('c')")
+                runBlocking { server.engine.autoIncrement.invalidate() }
+                s.execute("INSERT INTO t_ai (v) VALUES ('d')")
+            }
+            c.createStatement().use { s ->
+                s.executeQuery("SELECT id, v FROM t_ai ORDER BY id").use { rs ->
+                    val ids = ArrayList<Long>()
+                    while (rs.next()) ids.add(rs.getLong(1))
+                    // 段的边界会让 id 有空洞（设计文档 §11.4 的已知语义），
+                    // 但**绝不能重复**：重复的主键会静默覆盖行
+                    assertEquals(ids.size, ids.toSet().size, "自增 id 不能重复：$ids")
+                    assertEquals(4, ids.size, "4 行都要在：$ids")
+                }
+            }
+        }
+    }
+
+    /**
      * ★ **没有显式同意时，必须在启动阶段就拒绝**——而不是"能跑但悄悄失去互斥"。
      *
      * 这条守的是原则 P6：后端能力不够时，宁可拒绝服务，也不要让一个

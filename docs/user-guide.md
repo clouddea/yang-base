@@ -105,6 +105,10 @@ YangBase 是一个**把全部持久状态放在对象存储上的关系型数据
 ### 启动一个阿里云 OSS 实例
 
 ```bash
+# 下面的桶名/地域是**示例**，换成你自己的（桶要已经建好，见下）
+export AK=<你的 AccessKey ID>
+export SK=<你的 AccessKey Secret>
+
 ./gradlew :yb-server:run --args="\
   --s3-oss \
   --s3-bucket my-yangbase \
@@ -116,6 +120,15 @@ YangBase 是一个**把全部持久状态放在对象存储上的关系型数据
   --port 3306 --metrics-port 9104"
 ```
 
+**跑之前先确认两件事**（这两条是实际踩过的坑，都不是代码能替你猜的）：
+
+1. **桶要已经存在**：`--s3-bucket` 指向的桶必须先在控制台（或 `ossutil mb`）建好。
+   服务端**不会**替你建桶——首次 PUT 会直接报 `NoSuchBucket`（404）。（`yb-cli` 与
+   测试夹具会 `ensureBucket`，服务端不会：在一个账号里凭空建桶不是它该做的决定。）
+2. **密钥得真的传进来**：`--s3-access-key $AK` 里的 `$AK` 若没 `export`，shell 会
+   **安安静静地传一个空参数**，命令行看起来完全正常。先 `echo "len(${AK})=${#AK}"`
+   确认一下（空串现在会在启动时报错，而不是等到签名失败）。
+
 四个参数各有原因，**少一个都开不了机**：
 
 | 参数 | 为什么必须 |
@@ -123,25 +136,63 @@ YangBase 是一个**把全部持久状态放在对象存储上的关系型数据
 | `--s3-oss` | 让客户端用 **OSS 自己的原语**：原子创建发 `x-oss-forbid-overwrite`（冲突是 **409 FileAlreadyExists**，不是 S3 的 412）。少了它，条件创建会被 OSS 直接拒绝（400） |
 | `--s3-path-style false` | OSS **拒绝路径式寻址**（`SecondLevelDomainForbidden`：要求三级域名）。本项目默认对自建网关用路径式——MinIO 需要那样 |
 | `--s3-region cn-hangzhou` | 进 SigV4 的签名域，要填 OSS 的地域 |
-| `--i-accept-nonatomic-pointer-switch` | OSS **没有 ETag CAS**（实测 `If-Match` 返回 400 `NotImplemented`），而每次 flush/compaction 都要切 manifest 指针。不加它，服务端会在**能力探测阶段拒绝启动**（原则 P6：宁可拒绝，也不要悄悄失去互斥）；加了它会打一行醒目告警 |
+| `--i-accept-nonatomic-pointer-switch` | OSS **没有 ETag CAS**（实测 `If-Match` 返回 400 `NotImplemented`），而这套系统里有**三处**协调写入要用它。不加它，服务端会在**能力探测阶段拒绝启动**（原则 P6：宁可拒绝，也不要悄悄失去互斥）；加了它会打一行醒目告警 |
 
-> **降级的确切含义**：指针切换退化为「无前置条件 PUT + 写后回读校验」，接管分片时
-> 再做一次**孤儿快照审计**（`yb_manifest_orphan_snapshots_total`）。为什么可以接受
+> **这个开关覆盖哪三处**（它们背后是同一件事实：这个后端没有条件写，而我在单写者部署下接受它）：
+>
+> | 谁 | 什么时候用 CAS | 降级后 |
+> |---|---|---|
+> | **manifest 指针切换** | 每次 flush / compaction | 无前置条件 PUT + **写后回读校验**；接管分片时做**孤儿快照审计**（`yb_manifest_orphan_snapshots_total`） |
+> | **时间戳水位**（`meta/tso/<cluster>.json`） | 每次续期（`single` 模式默认 64 秒一次） | 同上；**回读发现被别的写者覆盖时拒绝发号**（宁可这条语句失败，也不发出可能重复的时间戳） |
+> | **自增段水位**（`auto_inc/`） | 每领一个新段（默认 1000 个 id 一次） | 同上；回读失败同样**拒绝**而不是重试。⚠️ **只有 `single`（单 CN）模式允许降级**：`ms` 模式下自增领段的互斥完全依赖这次 CAS（它没有走 MS），降级会让两个 CN 领到同一段、发出重复主键——所以在 `ms` + 无 CAS 的后端上，`AUTO_INCREMENT` 会**明确报错**（这是已知限制，见下） |
+>
+> ⚠️ **时间戳水位这一处曾经没接上开关**（2026-09-27 修复）：`single` 模式的 TSO 把水位
+> 持久化在对象存储上（重启后时间戳不回退），续期时无条件用 `If-Match`——于是在 OSS 上
+> "服务能起来、探测全过，但**第一条语句**就报 `CapabilityNotSupportedException`"。
+> 只有桶里**已经存在**水位对象时才会踩到（也就是**重启过**，或者桶被用过），
+> 所以空桶跑一遍测试是发现不了的。
+>
+> **降级的确切含义**：退化为「无前置条件 PUT + 写后回读校验」。为什么可以接受
 > （被覆盖的是 **SST 引用**而不是数据：水位一起回退，那批 WAL 不会被回收，恢复时会重放）
-> 见设计文档 §3.3 的不变式论证。**它不等于 CAS**，多 CN + OSS 属已知边界。
+> 见设计文档 §3.3 的不变式论证。**它不等于 CAS**，多 CN + OSS 属已知边界；
+> 它成立的**前提是单写者**——回读校验的作用就是把"其实有第二个写者"这件事变成一次明确失败。
 
 **两条硬限制**：
 
 1. **协调模式只能用 `single`（单 CN）或 `ms`**：`objectstore` 模式的租约与行锁
-   建立在 ETag CAS 上，OSS 做不到（会明确报错）。
+   建立在 ETag CAS 上，OSS 做不到——**启动时**就会拒绝并给出这两个替代方案
+   （那个模式降级掉之后不是"弱一点的协调"，而是"没有协调"）。
 2. **MS 的选举超时用生产默认量级**（500ms–1s）：OSS 上 MS 每次日志追加都是一次真实
    PUT，照搬内存后端的经验值会让集群在负载下反复换领导者——不报错，只是每次换都丢锁表。
+3. **`AUTO_INCREMENT` 只在单 CN 可用**：`ms`（多 CN）模式下自增领段的互斥依赖 ETag CAS，
+   而 OSS 没有。写入会**明确报错**（不是静默发重号）——需要多 CN + 自增时，
+   请用有 CAS 的后端（AWS S3 / MinIO / COS），或显式给主键。
+   （把领段交给 MS 串行化是 §11.4 的后续工作，尚未实现。）
 
 `yb-cli` 同样支持 OSS：加 `--s3-oss --path-style false`（或环境变量 `YB_S3_OSS=true`）。
+
+**起不来时先读"能力探测"那几行**：它逐项报告后端实测出来的能力，失败的项**带着异常链**
+（例如 `读写=✗ … ObjectStoreException: PUT … 403 InvalidAccessKeyId ← UncheckedIOException: …`）。
+最常见的四种，以及它们各自的指纹：
+
+| 报告里的指纹 | 原因 | 怎么办 |
+|---|---|---|
+| `404 NoSuchBucket` | 桶没建 | 先在控制台建桶 |
+| `403 InvalidAccessKeyId` / `SignatureDoesNotMatch` | 密钥错、已轮换、或变量没导出 | `echo ${#AK}`；换成新的 AK/SK |
+| `403 SecondLevelDomainForbidden` | 少了 `--s3-path-style false` | 补上（OSS 拒绝路径式寻址） |
+| `403` 提到 endpoint / 地域 | `--s3-region` 与桶所在地域不一致 | 改成桶的地域，如 `cn-hangzhou` |
+| `读写` ✓ 但 `比较交换 If-Match` ✗ | **正常**（OSS 没有 ETag CAS） | 加 `--i-accept-nonatomic-pointer-switch` |
 
 实测（2026-09-25，杭州）：单 CN 与**多 CN + 3 节点 MS**（MS 的 Raft 日志同样落在 OSS）
 全部通过，含**点查稳态 ≤ 1 次 GET**、COUNT 0 GET、索引 vs 全扫、分区裁剪、提交预算、
 重启恢复、Range/LIST、跨 CN 可见性与分片接管。
+
+> ⚠️ **但那一轮漏了一条路径**（2026-09-27 才暴露并修复）：测试夹具每次都在**空桶**上跑，
+> 于是时间戳水位走的是"第一次创建"（`If-None-Match`，OSS 支持）；
+> 只有桶里**已经有水位对象**时才会走 `If-Match`——也就是**任何一次重启之后**。
+> 换句话说：那轮"全过"没能证明"重启后还能跑"。现在两条路径都有用例盯着
+> （`OssCompatibilityTest` 里预置水位对象的那条 + 自增段领第二段的那条），
+> 而且都验证过"去掉修复就会红"。
 
 ### 连上它
 
@@ -562,9 +613,10 @@ SELECT * FROM t AS OF TSO 471234567890123456;
   ETag CAS 上，而 OSS 没有（实测 `If-Match` → 400 `NotImplemented`）。
 - **MS 的选举超时别调小**：OSS 上 MS 的每次日志追加都是一次真实 PUT（几十毫秒），
   超时太小会在负载下反复换领导者，每次换都丢掉锁表（§4.4）。
-- **`--i-accept-nonatomic-pointer-switch` 不是 CAS**：它把"指针切换失去原子性"
-  降级成"可发现 + 可恢复"（写后回读校验 + 接管时审计孤儿快照，指标
-  `yb_manifest_orphan_snapshots_total`）。单 CN 下这条风险由部署方式兜住；
+- **`--i-accept-nonatomic-pointer-switch` 不是 CAS**：它把三处协调写入
+  （manifest 指针切换 · 时间戳水位 · 自增段水位）的原子性降级成"可发现 + 可恢复"
+  （写后回读校验，回读发现被别人覆盖就**拒绝**；接管分片时审计孤儿快照，
+  指标 `yb_manifest_orphan_snapshots_total`）。单 CN 下这条风险由部署方式兜住；
   多 CN 场景请当作已知边界，论证见设计文档 §3.3。
 
 ---
@@ -628,6 +680,16 @@ curl -s localhost:9104/metrics | grep yangbase_
 # 迁移风险扫描：目标 SQL 里哪些部分本系统不支持、或语义与 MySQL 不同
 ./gradlew :yb-cli:cli -Pargs="analyze-sql --path ./migrations"
 ```
+
+> ⚠️ **在阿里云 OSS 这类没有 ETag CAS 的后端上，写命令要多加一个开关**：
+> `restore` / `pitr` 会切 manifest 指针，没有它会在执行时报"需要条件写能力"。
+> 单写者部署下显式接受降级即可（与 `yb-server` 的同名开关含义一致）：
+>
+> ```bash
+> ./gradlew :yb-cli:cli -Pargs="restore --yes --i-accept-nonatomic-pointer-switch --s3-oss --path-style false --endpoint ... --bucket ..."
+> ```
+>
+> 只读命令（`ls` / `shards` / `cost` / `backups` / `recover-check` / `cdc`）用不上条件写，不需要它。
 
 > 运行 `./gradlew :yb-cli:cli -Pargs="--help"` 看完整参数。
 

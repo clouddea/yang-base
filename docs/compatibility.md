@@ -84,7 +84,7 @@ DataGrip 建议开启 *introspect using JDBC metadata*。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| 单表 `SELECT` / `WHERE` / `ORDER BY` / `LIMIT` | ✅ | |
+| 单表 `SELECT` / `WHERE` / `ORDER BY` / `LIMIT` | ✅ | SELECT 列别名支持单引号（如 `id AS 'name'`，也可省略 AS）；其它位置的单引号仍表示字符串字面量 |
 | 聚合 `COUNT` / `SUM` / `AVG` / `MIN` / `MAX` / `GROUP_CONCAT` | ✅ | `DISTINCT` 可用；**忽略 NULL**（`COUNT(列)` 只数非空） |
 | `GROUP BY` / `HAVING` | ✅ | **强制 `ONLY_FULL_GROUP_BY`**（见下） |
 | `JOIN`（`INNER` / `LEFT` / `RIGHT` / `CROSS` / 逗号） | ✅ | 等值连接走哈希，非等值回退双层循环；`USING` / `NATURAL` 明确报错 |
@@ -335,8 +335,12 @@ CREATE TABLE t (s ENUM('z','a'));   -- 声明顺序与字典序不一致
 > 而 `objectstore` 模式的租约与行锁**正是建立在 CAS 之上**——在 OSS 上只能用
 > `single`（单 CN）或 `ms`。另外 OSS 上写入还需要
 > `--s3-oss --s3-path-style false --i-accept-nonatomic-pointer-switch`
-> （最后一个是显式接受「manifest 指针切换没有原子性」，见用户手册第二章「启动一个阿里云
-> OSS 实例」与设计文档 §3.3）。
+> （最后一个是显式接受「协调写入没有原子性」——它覆盖**三处**：manifest 指针切换 ·
+> 时间戳水位 · 自增段水位；三处都退化为「无前置条件 PUT + 写后回读校验」，
+> 见用户手册第二章「启动一个阿里云 OSS 实例」与设计文档 §3.3）。
+> ⚠️ **自增段那一处只在 `single`（单 CN）模式下可降级**：`ms` 模式下它的互斥完全
+> 依赖这次 CAS（自增领段没有走 MS），降级 ⇒ 两个 CN 领到同一段 ⇒ 重复主键。
+> 所以 OSS + `ms` 下 `AUTO_INCREMENT` 是**明确报错**的（不可用，但不是数据损坏）。
 
 **协调操作的代价（微基准数字，见 `:yb-bench:benchCoordination`）**：
 

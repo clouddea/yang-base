@@ -101,7 +101,7 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
                 // 症状是间歇性的（取决于连接是否被复用），而它会让重试层的用例
                 // 随机变红：一次超时本身就吃掉了整个总时限预算，
                 // 于是"重试 3 次后成功"变成"第 1 次就超时"。这一条是实测踩出来的。
-                ex.requestBody.transferTo(java.io.OutputStream.nullOutputStream())
+                drainBody(ex)
                 val code = if (status == 409) "ConditionalRequestConflict" else "ServiceUnavailable"
                 respond(ex, status, s3Error(code, "injected failure (测试注入)"), "application/xml")
                 return
@@ -113,7 +113,17 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
             val bucket = if (slash < 0) trimmed else trimmed.substring(0, slash)
             val key = if (slash < 0) "" else trimmed.substring(slash + 1)
             if (bucket != defaultBucket) {
-                respond(ex, 404, "NoSuchBucket".toByteArray(), "application/xml")
+                // ⚠️ 必须先**把请求体吃掉**再应答（原因见上面注入失败那段）：
+                // PUT 带着负载进来，服务端不回读就直接返回 404，HTTP/1.1 的
+                // 长连接上两边对不齐——客户端表现为 **Read timed out**，
+                // 而不是它本该看到的那条 404。症状同样是间歇性的
+                drainBody(ex)
+                // 必须是**真正的 S3 错误 XML**，不能只丢一个裸字符串：
+                // SDK 是从响应体里读 `<Code>` 的，而"桶不存在"与"对象不存在"
+                // 都是 404——只有错误码能区分它们（前者是配置错误、后者是正常状态，
+                // 混起来会让目录/GC/恢复读到一个"空世界"）。夹具不还原这一点，
+                // 就测不出真实后端上的那条路径
+                respond(ex, 404, s3Error("NoSuchBucket", "The specified bucket does not exist."), "application/xml")
                 return
             }
             val query = parseQuery(ex.requestURI.query)
@@ -124,7 +134,7 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
                 "POST" -> when {
                     query.containsKey("uploads") -> createMultipart(ex, key)
                     query["uploadId"] != null -> completeMultipart(ex, key, query["uploadId"]!!)
-                    else -> respond(ex, 400, "BadRequest".toByteArray(), "text/plain")
+                    else -> { drainBody(ex); respond(ex, 400, "BadRequest".toByteArray(), "text/plain") }
                 }
                 "PUT" -> if (query["uploadId"] != null && query["partNumber"] != null) {
                     uploadPart(ex, key, query["uploadId"]!!, query["partNumber"]!!.toInt())
@@ -139,10 +149,11 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
                 } else {
                     delete(ex, key)
                 }
-                else -> respond(ex, 405, "MethodNotAllowed".toByteArray(), "text/plain")
+                else -> { drainBody(ex); respond(ex, 405, "MethodNotAllowed".toByteArray(), "text/plain") }
             }
         } catch (t: Throwable) {
             runCatching {
+                drainBody(ex)
                 respond(ex, 500, "InternalError: ${t.message}".toByteArray(), "text/plain")
             }
         } finally {
@@ -412,6 +423,18 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
             append("</ListBucketResult>")
         }
         respond(ex, 200, xml.toByteArray(Charsets.UTF_8), "application/xml")
+    }
+
+    /**
+     * 把请求体**读完丢掉**。
+     *
+     * 所有"没打算读负载就返回"的分支都必须先调它：HTTP/1.1 是长连接，
+     * 服务端不回读就应答，客户端还在写、服务端却在等下一个请求行——
+     * 两边对不齐，客户端最终报 **Read timed out**（一个与真实原因无关的错误），
+     * 而且是间歇性的（取决于连接是否被复用）。这条是实测踩出来的。
+     */
+    private fun drainBody(ex: HttpExchange) {
+        runCatching { ex.requestBody.transferTo(java.io.OutputStream.nullOutputStream()) }
     }
 
     private fun respond(ex: HttpExchange, code: Int, body: ByteArray, contentType: String) {
