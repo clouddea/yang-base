@@ -380,4 +380,27 @@ class PartitioningTest {
         // 只要在主键里，位置无关，总能从编码里解出来
         assertEquals(1, Partitioning.partitionIndexFromPk(t, pk))
     }
+    @Test
+    fun `显式 HASH 列在复合主键末尾 - 写入点查裁剪必须同路由`() {
+        val t = TableSchema(tableId = 1, databaseId = 1, name = "h", version = 1,
+            columns = listOf(col("id", ColumnType.BIGINT), col("tenant", ColumnType.BIGINT)),
+            primaryKey = listOf("id", "tenant"), partitionKind = PartitionKind.HASH,
+            partitionCount = 4, partitionColumn = "tenant")
+        Partitioning.validate(t)
+        for (tenant in -20L..20L) {
+            val expected = Partitioning.hashPartitionOf(t, Datum.I64(tenant))
+            for (id in 1L..8L) {
+                val row = listOf(Datum.I64(id), Datum.I64(tenant))
+                val pk = com.cloudea.yangbase.common.KeyEncoder.encodeKey(row, t, t.primaryKeyIndexes)
+                assertEquals(expected, Partitioning.partitionIndexFor(t, row))
+                assertEquals(expected, Partitioning.partitionIndexFromPk(t, pk))
+            }
+            assertEquals(setOf(expected), Partitioning.prune(t, eq(Datum.Str(tenant.toString()))))
+        }
+        assertNull(Partitioning.prune(t, Partitioning.Constraint(listOf(
+            Partitioning.Interval(Datum.I64(1), true, Datum.I64(9), true)))))
+        assertFailsWith<SqlException> { Partitioning.validate(t.copy(primaryKey = listOf("id"))) }
+        assertFailsWith<SqlException> { Partitioning.validate(t.copy(partitionExpr = "ABS(tenant)")) }
+    }
+
 }

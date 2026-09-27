@@ -3352,7 +3352,7 @@ class Executor(private val engine: DatabaseEngine) {
 
     /** 分区裁剪的结果（`partitions` 列）。推不出约束时为 NULL，表示全部分区。 */
     private fun explainPartitions(table: TableSchema, where: Expr?): String? {
-        if (!table.isEnumeratedPartition) return null
+        if (!table.isEnumeratedPartition && !com.cloudea.yangbase.txn.Partitioning.hasHashColumn(table)) return null
         val shards = prunedShards(table, where) ?: return null
         if (shards.isEmpty()) return null
         return shards.joinToString(",") { shard ->
@@ -3512,7 +3512,6 @@ class Executor(private val engine: DatabaseEngine) {
      * 如果把它当成 null 处理，就退化成了全表扫描。
      */
     private fun prunedShards(table: TableSchema, where: Expr?): List<com.cloudea.yangbase.common.ShardId>? {
-        if (!table.isEnumeratedPartition) return null
         val c = PartitionPrune.constraintFor(table, where) ?: return null
         val keep = com.cloudea.yangbase.txn.Partitioning.prune(table, c) ?: return null
         return keep.sorted().map { engine.shard(table, it) }

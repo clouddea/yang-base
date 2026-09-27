@@ -24,7 +24,12 @@ object PartitionPrune {
      * 绝不允许收紧，否则会漏掉本该返回的行。真正的过滤仍由 WHERE 兜底。
      */
     fun constraintFor(table: TableSchema, where: Expr?): Partitioning.Constraint? {
-        if (where == null || !table.isEnumeratedPartition) return null
+        if (where == null) return null
+        if (Partitioning.hasHashColumn(table)) {
+            val values = hashValues(where, table) ?: return null
+            return Partitioning.Constraint(values.map { Partitioning.Interval(it, true, it, true) })
+        }
+        if (!table.isEnumeratedPartition) return null
         val col = table.partitionColumn ?: return null
         val intervals = collect(where, col) ?: return null
         if (intervals.isEmpty()) return null
@@ -37,6 +42,38 @@ object PartitionPrune {
         return Partitioning.Constraint(
             intervals.map { Partitioning.Interval(it.low?.coerceTo(type), it.lowInclusive, it.high?.coerceTo(type), it.highInclusive) }
         )
+    }
+
+    // HASH 只需离散值。AND 取任一已知约束（放宽），OR 必须两侧都有约束；
+    // 不在类型转换前做区间求交，避免 42 与 '42' 比较出空集而漏行。
+    private fun hashValues(e: Expr, table: TableSchema): List<Datum>? {
+        val col = table.partitionColumn ?: return null
+        val type = table.column(col).type
+        fun value(expr: Expr) = lit(expr)?.coerceTo(type)
+        return when (e) {
+            is BinaryOp -> when (e.op.uppercase()) {
+                "AND" -> hashValues(e.left, table) ?: hashValues(e.right, table)
+                "OR" -> {
+                    val left = hashValues(e.left, table) ?: return null
+                    val right = hashValues(e.right, table) ?: return null
+                    left + right
+                }
+                "=", "<=>" -> {
+                    val v = when {
+                        refersTo(e.left, col) -> value(e.right)
+                        refersTo(e.right, col) -> value(e.left)
+                        else -> null
+                    }
+                    v?.let { listOf(it) }
+                }
+                else -> null
+            }
+            is InList -> if (!e.negated && refersTo(e.expr, col)) {
+                val vs = e.values.map { value(it) }
+                if (vs.any { it == null }) null else vs.filterNotNull()
+            } else null
+            else -> null
+        }
     }
 
     /**

@@ -61,8 +61,7 @@ interface BlockSkipper {
 /**
  * 一次扫描可以下推到存储层的约束。
  *
- * 刻意**只表达「某列在某个区间内」**这一种形式：它是 minmax 跳数索引
- * 能直接回答的问题。更复杂的谓词（函数、OR 组合）到不了这一层，
+ * 表达列区间、等值和 LIKE 字面量模式。更复杂的谓词（函数、OR 组合）到不了这一层，
  * 由上层逐行过滤兜底——**裁剪只允许放宽，绝不允许收紧**。
  */
 data class ColumnRange(
@@ -74,4 +73,6 @@ data class ColumnRange(
     val highInclusive: Boolean = true,
     /** 等值查询：minmax 与 bloom 都能用，且能裁得更狠。 */
     val equality: Datum? = null,
+    /** LIKE 原始模式；按与 SQL 相同的 % / _ 语义交给 ngram 跳数索引。 */
+    val likePattern: String? = null,
 )

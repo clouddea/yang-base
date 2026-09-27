@@ -35,3 +35,21 @@ tasks.register<JavaExec>("benchCoordination") {
 // 基准测试模块不含生产代码，因此不纳入覆盖率门禁。
 // 它由 ./gradlew :yb-bench:bench 直接运行验证。
 tasks.matching { it.name == "koverVerify" }.configureEach { enabled = false }
+
+// 独立 opt-in 性能门禁：任何索引没有节省 IO 或返回错误结果都会以非零码退出。
+tasks.register<JavaExec>("benchIndexes") {
+    description = "验收全部索引的 SQL 读路径、请求数、字节数（默认内嵌 S3）"
+    group = "verification"
+    mainClass.set("com.cloudea.yangbase.bench.IndexBenchKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs("-Xmx2g")
+    systemProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
+    listOf("YB_S3_ENDPOINT", "YB_S3_BUCKET", "YB_S3_REGION", "YB_S3_PATH_STYLE", "YB_S3_OSS",
+        "YB_INDEX_ROWS", "YB_INDEX_SAMPLES", "YB_INDEX_REPORT").forEach { key ->
+        providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    }
+    // 密钥仅由环境传入子进程，不放在 JVM 参数或 Gradle -P 命令行中。
+    listOf("YB_S3_ACCESS_KEY", "YB_S3_SECRET_KEY").forEach { key ->
+        providers.environmentVariable(key).orNull?.let { environment(key, it) }
+    }
+}

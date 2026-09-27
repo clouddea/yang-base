@@ -276,4 +276,47 @@ class SkipIndexIntegrationTest {
                 counting.keyReport(),
         )
     }
+    @Test
+    fun `NGRAM LIKE 真正读取跳数文件且减少 IO - 与全扫逐条一致`() {
+        connect().use { c ->
+            c.st { s ->
+                s.execute("CREATE DATABASE IF NOT EXISTS skipdb")
+                s.execute("USE skipdb")
+                s.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, txt VARCHAR(256), KEY ix(txt) USING NGRAM)")
+                for (start in 1..5000 step 500) {
+                    s.execute("INSERT INTO t VALUES " + (start until start + 500).joinToString(",") { id ->
+                        val text = when {
+                            id % 31 == 0 -> "NULL"
+                            id > 4900 -> "'rare needle 稀有标记'"
+                            else -> "'ordinary document background ${"x".repeat(100)}'"
+                        }
+                        "($id,$text)"
+                    })
+                }
+            }
+        }
+        runBlocking { server.engine.flushAll() }
+        val narrow = measureColdCached("SELECT id FROM t WHERE txt LIKE '%needle%'")
+        assertTrue(counting.keysFor("get").any { it.first.endsWith(".skp") }, "必须实际读取 ngram 文件")
+        val wide = measureColdCached("SELECT id FROM t WHERE CONCAT(txt,'') LIKE '%needle%'")
+        assertTrue(narrow < wide * 0.6, "NGRAM 未节省 IO: $narrow / $wide")
+        connect().use { c -> c.st { s ->
+            s.execute("USE skipdb")
+            for (pattern in listOf("%needle%", "%稀有标记%", "%不存在%", "%ne_dle%", "rare%", "%", "__", "%a%", "")) {
+                assertEquals(
+                    s.query("SELECT id FROM t WHERE CONCAT(txt,'') LIKE '$pattern' ORDER BY id"),
+                    s.query("SELECT id FROM t WHERE txt LIKE '$pattern' ORDER BY id"), pattern,
+                )
+            }
+            assertEquals(
+                s.query("SELECT id FROM t WHERE CONCAT(txt,'') NOT LIKE '%needle%' ORDER BY id"),
+                s.query("SELECT id FROM t WHERE txt NOT LIKE '%needle%' ORDER BY id"),
+            )
+            assertEquals(
+                s.query("SELECT id FROM t WHERE CONCAT(txt,'') LIKE '%needle%' OR id=1 ORDER BY id"),
+                s.query("SELECT id FROM t WHERE txt LIKE '%needle%' OR id=1 ORDER BY id"),
+            )
+        } }
+    }
+
 }

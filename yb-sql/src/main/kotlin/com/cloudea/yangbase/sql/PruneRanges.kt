@@ -43,6 +43,13 @@ object PruneRanges {
             }
             is Between -> if (!e.negated) between(e, table, out)
             is InList -> if (!e.negated) inList(e, table, out)
+            is Like -> if (!e.negated) {
+                val col = column(e.expr, table)
+                val pattern = (e.pattern as? Literal)?.value as? Datum.Str
+                if (col != null && col.second.isString && pattern != null) {
+                    add(out, col.first, ColumnRange(column = col.first, likePattern = pattern.v))
+                }
+            }
             else -> {}
         }
     }

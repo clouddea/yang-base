@@ -121,20 +121,35 @@ object Partitioning {
         return call.substring(open + 1, close).trim().trim('\'', '"')
     }
 
+    /** HASH 声明列与等值裁剪共用的路由；没有显式列的内部 schema 仍按完整主键分片。 */
+    fun hasHashColumn(table: TableSchema): Boolean =
+        table.partitionKind == PartitionKind.HASH && table.partitionColumn != null
+
+    /** 单列 HASH 的值路由。写入、主键点查、分区裁剪必须调用同一个函数。 */
+    fun hashPartitionOf(table: TableSchema, value: Datum): Int {
+        val type = table.column(requireNotNull(table.partitionColumn)).type
+        val v = applyExpr(table, value.coerceTo(type))
+        val encoded = KeyEncoder.encodeDatum(v, type)
+        val hash = com.cloudea.yangbase.storage.XxHash64.hash(encoded, 0x5DEECE66DL)
+        val n = table.effectivePartitionCount
+        return (((hash % n) + n) % n).toInt()
+    }
+
     // ── 路由 ──────────────────────────────────────────────────────
 
     /**
      * 一行落在哪个分区。
      *
-     * 只有 [PartitionKind.isEnumerated] 的分区（RANGE/LIST）走值路由；
-     * HASH/KEY 的主键哈希路由在 [DatabaseEngine.shardFor] 里，因为它只需要主键编码。
+     * RANGE/LIST 与显式单列 HASH 走值路由；KEY 的完整主键哈希在 [DatabaseEngine.shardFor]。
      */
     fun partitionIndexFor(table: TableSchema, row: List<Datum>): Int {
-        if (!table.isEnumeratedPartition) return -1
+        if (!table.isEnumeratedPartition && !hasHashColumn(table)) return -1
         val col = table.partitionColumn ?: return 0
         val idx = table.indexOf(col)
         // 分区表达式（如 TO_DAYS）必须作用在列值上，否则就是拿时间戳比天数
-        val v = applyExpr(table, row.getOrNull(idx) ?: Datum.Null)
+        val raw = row.getOrNull(idx) ?: Datum.Null
+        if (hasHashColumn(table)) return hashPartitionOf(table, raw)
+        val v = applyExpr(table, raw)
         return when (table.partitionKind) {
             PartitionKind.RANGE -> rangePartitionOf(table, v)
             PartitionKind.LIST -> listPartitionOf(table, v)
@@ -208,7 +223,14 @@ object Partitioning {
      * 一定没有结果——这是一个**零 IO 的空结果**，也是裁剪最有价值的形态。
      */
     fun prune(table: TableSchema, constraint: Constraint?): Set<Int>? {
-        if (!table.isEnumeratedPartition || constraint == null) return null
+        if (constraint == null) return null
+        if (hasHashColumn(table)) {
+            // 哈希没有单调性：只有闭区间退化为单个值时才能路由，范围必须保守全扫。
+            if (constraint.intervals.any { it.low == null || it.high == null ||
+                    !it.lowInclusive || !it.highInclusive || it.low.compareTo(it.high) != 0 }) return null
+            return constraint.intervals.map { hashPartitionOf(table, it.low!!) }.toSet()
+        }
+        if (!table.isEnumeratedPartition) return null
         val col = table.columns[table.indexOf(table.partitionColumn!!)]
         val n = table.effectivePartitionCount
         val keep = LinkedHashSet<Int>()
@@ -248,7 +270,7 @@ object Partitioning {
         if (table.partitionKind == PartitionKind.NONE) return
         if (!table.partitionKind.isEnumerated) {
             if (table.partitionCount <= 0) throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000", "PARTITIONS 必须为正数")
-            return
+            if (!hasHashColumn(table)) return
         }
         val col = table.partitionColumn
             ?: throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000", "${table.partitionKind} 分区必须指定分区列")
@@ -258,6 +280,13 @@ object Partitioning {
                 MySqlErrors.ER_PARSE_ERROR, "42000",
                 "分区列 '$col' 必须是主键的一部分（否则主键点查无法定位分区）",
             )
+        }
+        if (hasHashColumn(table)) {
+            if (table.partitionExpr != null) throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000",
+                "HASH 当前支持直接引用分区列，不支持分区表达式")
+            if (!table.column(col).type.isInteger) throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000",
+                "HASH 分区列必须为整数类型")
+            return
         }
         if (table.partitions.isEmpty()) {
             throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000", "${table.partitionKind} 分区必须给出分区定义")
@@ -307,13 +336,15 @@ object Partitioning {
 
     /** 由主键编码反查分区。分区列在主键里，所以可以从编码中解出它的值。 */
     fun partitionIndexFromPk(table: TableSchema, encodedPk: ByteArray): Int {
-        if (!table.isEnumeratedPartition) return -1
+        if (!table.isEnumeratedPartition && !hasHashColumn(table)) return -1
         val colName = table.partitionColumn ?: return 0
         val colIdx = table.indexOf(colName)
         val pkPos = table.primaryKeyIndexes.indexOf(colIdx)
         if (pkPos < 0) return 0
         val values = KeyEncoder.decodeComponents(encodedPk, table, table.primaryKeyIndexes)
-        val v = applyExpr(table, values.getOrNull(pkPos) ?: Datum.Null)
+        val raw = values.getOrNull(pkPos) ?: Datum.Null
+        if (hasHashColumn(table)) return hashPartitionOf(table, raw)
+        val v = applyExpr(table, raw)
         return when (table.partitionKind) {
             PartitionKind.RANGE -> rangePartitionOf(table, v)
             PartitionKind.LIST -> listPartitionOf(table, v)

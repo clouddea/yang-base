@@ -136,6 +136,7 @@ yang-base/
 ./gradlew :yb-cli:test                 # 运维 CLI 测试
 ./gradlew :yb-cli:cli -Pargs="ls --fs /path"   # 跑一条 CLI 命令
 ./gradlew :yb-bench:bench              # 基准测试
+./gradlew :yb-bench:benchIndexes       # 全部索引的 SQL + IO 性能门禁（18 场景）
 ./gradlew check                        # 静态检查 + 单元测试（**不含** integrationTest）
 ./gradlew build integrationTest        # 提交前跑这个
 ```
@@ -292,10 +293,14 @@ GC 覆盖 MS 日志与已删表遗留 · `ls`/`cost` 只花 LIST 的请求、不
 > 不可预取，否则时间戳集合在可见性判断上不再稠密）。有了 MS 就由它统一发号，
 > 这条假设随之消失。
 
-### 不能用真实云对象存储跑测试
+### 默认测试不使用真实云对象存储
 
-集成测试一律用内嵌 S3 服务器。需要验证后端差异（条件写、强一致）时，直接在
-`EmbeddedS3Server` 上构造对应场景，而不是打真实云。
+集成测试与默认基准使用内嵌 S3。需要验证后端差异（条件写、强一致）时，
+优先在 `EmbeddedS3Server` 上构造对应场景。
+
+用户明确要求真实后端验收时，可运行独立的 `:yb-bench:benchIndexes`，
+使用随机前缀隔离和按前缀清理，禁止清空整个桶；密钥仅通过运行环境传入。
+完整覆盖矩阵、IO 门禁、MinIO/OSS 入口见 [docs/index-bench.md](docs/index-bench.md)。
 
 ---
 

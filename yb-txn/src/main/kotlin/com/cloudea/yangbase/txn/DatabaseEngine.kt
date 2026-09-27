@@ -187,7 +187,7 @@ class DatabaseEngine(
     /** 行 → 分区号。写入路径手里有整行，不需要绕道主键编码。 */
     fun partitionOfRow(table: TableSchema, row: List<Datum>): Int {
         if (table.partitionKind == PartitionKind.NONE) return 0
-        if (table.isEnumeratedPartition) return Partitioning.partitionIndexFor(table, row)
+        if (table.isEnumeratedPartition || Partitioning.hasHashColumn(table)) return Partitioning.partitionIndexFor(table, row)
         if (table.effectivePartitionCount <= 1) return 0
         val pk = KeyEncoder.encodeKey(row, table, table.primaryKeyIndexes)
         return hashPartition(table, pk)
@@ -196,7 +196,7 @@ class DatabaseEngine(
     /** 主键编码 → 分区号。 */
     fun partitionOf(table: TableSchema, encodedPk: ByteArray): Int {
         if (table.partitionKind == PartitionKind.NONE) return 0
-        if (table.isEnumeratedPartition) return Partitioning.partitionIndexFromPk(table, encodedPk)
+        if (table.isEnumeratedPartition || Partitioning.hasHashColumn(table)) return Partitioning.partitionIndexFromPk(table, encodedPk)
         return hashPartition(table, encodedPk)
     }
 

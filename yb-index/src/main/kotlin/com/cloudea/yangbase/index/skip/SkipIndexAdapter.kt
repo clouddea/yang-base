@@ -108,6 +108,7 @@ class SkipIndexBlockSkipper(
      * **两者都只允许放宽**：谓词比真实约束更宽只会少剪几个块，更窄就是漏行。
      */
     private fun toPredicate(r: ColumnRange): SkipPredicate? {
+        r.likePattern?.let { return SkipPredicate.Like(r.column, it) }
         val eq = r.equality
         if (eq != null && eq !is Datum.Null) return SkipPredicate.Equals(r.column, eq)
         val lo = r.low?.takeIf { it !is Datum.Null }?.let { Bound(it, r.lowInclusive) }

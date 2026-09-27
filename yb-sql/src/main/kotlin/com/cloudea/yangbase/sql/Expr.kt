@@ -686,31 +686,7 @@ object Eval {
     /** SQL LIKE 的通配匹配。`%` 匹配任意长度，`_` 匹配单字符。 */
     fun likeMatch(value: Datum, pattern: Datum): Boolean {
         if (value is Datum.Null || pattern is Datum.Null) return false
-        val s = value.asString()
-        val p = pattern.asString()
-        return likeMatch(s, 0, p, 0)
-    }
-
-    private fun likeMatch(s: String, si: Int, p: String, pi: Int): Boolean {
-        var i = si
-        var j = pi
-        while (j < p.length) {
-            when (p[j]) {
-                '%' -> {
-                    // 连续的 % 等价于一个
-                    while (j < p.length && p[j] == '%') j++
-                    if (j == p.length) return true
-                    for (k in i..s.length) if (likeMatch(s, k, p, j)) return true
-                    return false
-                }
-                '_' -> { if (i >= s.length) return false; i++; j++ }
-                else -> {
-                    if (i >= s.length || s[i] != p[j]) return false
-                    i++; j++
-                }
-            }
-        }
-        return i == s.length
+        return com.cloudea.yangbase.index.skip.LikeMatcher.matches(value.asString(), pattern.asString())
     }
 
     /**
