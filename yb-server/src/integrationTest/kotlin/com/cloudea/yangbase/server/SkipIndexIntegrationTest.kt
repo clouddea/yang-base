@@ -26,22 +26,17 @@ import kotlin.test.assertTrue
 @org.junit.jupiter.api.Tag("integration")
 class SkipIndexIntegrationTest {
 
-    private var s3: EmbeddedS3Server? = null
+    private lateinit var backend: IntegrationStore
     private lateinit var server: YangBaseServer
     private lateinit var counting: CountingObjectStore
     private var port: Int = 0
 
     @BeforeTest
     fun setUp() {
-        val emb = EmbeddedS3Server("yangbase-skip")
-        emb.start()
-        s3 = emb
-        val raw = S3ObjectStore.create(
-            bucket = "yangbase-skip", endpoint = emb.endpoint,
-            region = "us-east-1", accessKey = "t", secretKey = "t",
-        )
+        backend = IntegrationStore("yangbase-skip")
+        val raw = backend.store
         counting = CountingObjectStore(raw, recordKeys = true)
-        server = YangBaseServer.forTesting(store = counting, port = 0)
+        server = YangBaseServer.forTesting(store = counting, allowNonAtomicPointerSwitch = backend.oss, port = 0)
         server.start()
         port = server.boundPort
         Class.forName("com.mysql.cj.jdbc.Driver")
@@ -50,7 +45,7 @@ class SkipIndexIntegrationTest {
     @AfterTest
     fun tearDown() {
         runCatching { server.stop() }
-        s3?.let { runCatching { it.stop() } }
+        if (::backend.isInitialized) runCatching { backend.close() }
     }
 
     private fun connect(): Connection = DriverManager.getConnection(
@@ -131,7 +126,7 @@ class SkipIndexIntegrationTest {
      * 实际什么都没测——比不写更糟，因为它给出虚假的安全感。
      */
     private fun measureColdCached(sql: String): Long {
-        val cold = YangBaseServer.forTesting(store = counting, port = 0, cacheBytes = 0)
+        val cold = YangBaseServer.forTesting(store = counting, allowNonAtomicPointerSwitch = backend.oss, port = 0, cacheBytes = 0)
         cold.start()
         return try {
             val c = DriverManager.getConnection(

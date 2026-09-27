@@ -43,7 +43,7 @@ import kotlin.test.fail
  */
 abstract class ObservabilityClusterFixture {
 
-    private var s3: EmbeddedS3Server? = null
+    private lateinit var backend: IntegrationStore
 
     /** 生产的分层：指标装饰在最外，计数夹具在里面（见 `YangBaseServer.start`）。 */
     protected lateinit var counting: CountingObjectStore
@@ -68,20 +68,13 @@ abstract class ObservabilityClusterFixture {
 
     @BeforeTest
     fun startCluster() {
-        val emb = EmbeddedS3Server("yangbase-obs")
-        emb.start()
-        s3 = emb
-        val raw = S3ObjectStore.create(
-            bucket = "yangbase-obs",
-            endpoint = emb.endpoint,
-            region = "us-east-1",
-            accessKey = "t",
-            secretKey = "t",
-        )
+        backend = IntegrationStore("yangbase-obs")
+        val raw = backend.store
         // recordKeys 打开：断言失败时能直接看到「这些请求打在哪」
         counting = CountingObjectStore(raw, recordKeys = true)
         server = YangBaseServer.forTesting(
             store = counting,
+            allowNonAtomicPointerSwitch = backend.oss,
             port = 0,
             metricsPort = 0,               // 由系统分配端口
             cacheBytes = cacheBytes(),
@@ -98,7 +91,7 @@ abstract class ObservabilityClusterFixture {
     @AfterTest
     fun stopCluster() {
         runCatching { server.stop() }
-        s3?.let { runCatching { it.stop() } }
+        if (::backend.isInitialized) runCatching { backend.close() }
     }
 
     // ── 夹具 ──────────────────────────────────────────────────────

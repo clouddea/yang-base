@@ -35,7 +35,7 @@ import kotlin.test.assertTrue
 @org.junit.jupiter.api.Tag("integration")
 class OptimizerIntegrationTest {
 
-    private var s3: EmbeddedS3Server? = null
+    private lateinit var backend: IntegrationStore
     private lateinit var server: YangBaseServer
     private lateinit var counting: CountingObjectStore
     private var port: Int = 0
@@ -44,17 +44,12 @@ class OptimizerIntegrationTest {
 
     @BeforeTest
     fun setUp() {
-        val emb = EmbeddedS3Server("yangbase-opt")
-        emb.start()
-        s3 = emb
-        val raw: ObjectStore = S3ObjectStore.create(
-            bucket = "yangbase-opt", endpoint = emb.endpoint,
-            region = "us-east-1", accessKey = "t", secretKey = "t",
-        )
+        backend = IntegrationStore("yangbase-opt")
+        val raw = backend.store
         // recordKeys 打开：断言失败时要能直接看到「这几次请求到底打在哪」，
         // 而不是对着一个数字猜
         counting = CountingObjectStore(raw, recordKeys = true)
-        server = YangBaseServer.forTesting(store = counting, port = 0)
+        server = YangBaseServer.forTesting(store = counting, allowNonAtomicPointerSwitch = backend.oss, port = 0)
         server.start()
         port = server.boundPort
         Class.forName("com.mysql.cj.jdbc.Driver")
@@ -63,7 +58,7 @@ class OptimizerIntegrationTest {
     @AfterTest
     fun tearDown() {
         runCatching { server.stop() }
-        s3?.let { runCatching { it.stop() } }
+        if (::backend.isInitialized) runCatching { backend.close() }
     }
 
     // ── 夹具 ──────────────────────────────────────────────────────
@@ -459,7 +454,7 @@ class OptimizerIntegrationTest {
      * 而不是「上一次跑完还剩什么在内存里」。
      */
     private fun <T> measureCold(block: (Connection) -> T): Pair<T, OptIoSnapshot> {
-        val cold = YangBaseServer.forTesting(store = counting, port = 0, cacheBytes = 0)
+        val cold = YangBaseServer.forTesting(store = counting, allowNonAtomicPointerSwitch = backend.oss, port = 0, cacheBytes = 0)
         cold.start()
         try {
             val cc = DriverManager.getConnection(

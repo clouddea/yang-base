@@ -99,7 +99,7 @@ class TableStatsStore(private val engine: DatabaseEngine) {
             val indexes = lsm.loadedIndexes()
             val exact = lsm.exactRowCount()
             val memEntries = lsm.stats().memtableEntries
-            val name = bumped.partitions.getOrNull(pid.toInt())?.name ?: "p$pid"
+            val name = bumped.partitions.firstOrNull { it.partitionId == pid }?.name ?: "p$pid"
             val collected = collector.collect(pid, name, indexes, exact, memEntries)
             summaries += collected.summary
             val obj = PartitionColumnStats(

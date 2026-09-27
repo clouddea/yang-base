@@ -96,7 +96,7 @@ fun aliasMapOf(stmt: SelectStmt): Map<String, Expr> {
  * 而递归替换会带来 `SELECT x AS x` 这种自引用的死循环。
  */
 fun resolveAliases(e: Expr, aliases: Map<String, Expr>): Expr = when {
-    e is ColumnRef -> aliases[e.name.lowercase()]?.takeIf { it !== e } ?: e
+    e is ColumnRef && e.table == null -> aliases[e.name.lowercase()]?.takeIf { it !== e } ?: e
     e is BinaryOp -> BinaryOp(e.op, resolveAliases(e.left, aliases), resolveAliases(e.right, aliases))
     e is UnaryOp -> UnaryOp(e.op, resolveAliases(e.expr, aliases))
     e is InList -> InList(resolveAliases(e.expr, aliases), e.values.map { resolveAliases(it, aliases) }, e.negated)

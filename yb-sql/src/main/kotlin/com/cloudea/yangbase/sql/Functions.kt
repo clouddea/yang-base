@@ -277,7 +277,8 @@ internal object Builtins {
         reg1("HEX") { d ->
             // HEX(字符串) 走字节；HEX(数字) 走 MySQL 的整数十六进制（含负数补码）
             if (d is Datum.Str || d is Datum.Bin) {
-                Datum.Str(str(d).toByteArray(Charsets.UTF_8).joinToString("") { "%02X".format(it) })
+                val bytes = if (d is Datum.Bin) d.v else str(d).toByteArray(Charsets.UTF_8)
+                Datum.Str(bytes.joinToString("") { "%02X".format(it) })
             } else {
                 Datum.Str(java.lang.Long.toHexString(lng(d)).uppercase())
             }

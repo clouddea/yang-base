@@ -395,9 +395,10 @@ object JoinEngine {
         stmt.projections.forEach { if (it is SelectItem.Field) check(it.expr, "field list") }
         check(stmt.where, "where clause")
         stmt.joins.forEach { check(it.on, "on clause") }
-        stmt.groupBy.forEach { check(it, "group statement") }
-        check(stmt.having, "having clause")
-        stmt.orderBy.forEach { check(it.expr, "order clause") }
+        val aliases = aliasMapOf(stmt)
+        stmt.groupBy.forEach { check(resolveAliases(it, aliases), "group statement") }
+        stmt.having?.let { check(resolveAliases(it, aliases), "having clause") }
+        stmt.orderBy.forEach { check(resolveAliases(it.expr, aliases), "order clause") }
     }
 
     /**

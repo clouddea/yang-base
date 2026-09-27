@@ -48,5 +48,7 @@ Thumbs.db
 # 那是一整个数据库，不是源码。
 # /data/
 
-# 项目
-docs/sql-manual/*
+# 本地手工验证材料（SQL、执行代码和报告），不纳入版本库。
+docs/sql-manual/
+yb-server/src/integrationTest/kotlin/com/cloudea/yangbase/server/ManualSqlRegressionIntegrationTest.kt
+yb-server/src/test/kotlin/com/cloudea/yangbase/server/ManualRegressionTest.kt

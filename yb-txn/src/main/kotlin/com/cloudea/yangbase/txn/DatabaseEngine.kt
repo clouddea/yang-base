@@ -161,7 +161,7 @@ class DatabaseEngine(
      * 那条约束存在的唯一理由就是让这个函数成立。
      */
     fun shardFor(table: TableSchema, encodedPk: ByteArray): ShardId {
-        return ShardId(TableId(table.tableId), PartitionId(partitionOf(table, encodedPk).toLong()))
+        return shard(table, partitionOf(table, encodedPk))
     }
 
     /** 行 → 分区号。写入路径手里有整行，不需要绕道主键编码。 */
@@ -189,12 +189,12 @@ class DatabaseEngine(
 
     fun allShards(table: TableSchema): List<ShardId> {
         val n = table.effectivePartitionCount
-        return (0 until n).map { ShardId(TableId(table.tableId), PartitionId(it.toLong())) }
+        return (0 until n).map { shard(table, it) }
     }
 
     /** 指定分区号的存储（分区裁剪后只打开命中的那些）。 */
     fun shard(table: TableSchema, partition: Int): ShardId =
-        ShardId(TableId(table.tableId), PartitionId(partition.toLong()))
+        ShardId(TableId(table.tableId), PartitionId(table.storagePartitionId(partition)))
 
     suspend fun shardStore(shard: ShardId, table: TableSchema): LsmStore {
         val k = shard.toString()
@@ -1039,14 +1039,9 @@ class DatabaseEngine(
             val lsm = shardStore(shard, table)
             val rows = lsm.scan(null, null, readTs)
             if (rows.isEmpty()) continue
-            val ts = tso.next()
-            lsm.write(
-                WalBatch(
-                    "tx-purge-${nodeId}-${txCounter.incrementAndGet()}",
-                    ts.value,
-                    rows.map { WalOp(it.userKey, null) },
-                )
-            )
+            // 分区删除/清空也必须删除二级索引中的完整行副本。
+            val decoded = rows.map { RowCodec.decode(it.value, table) }
+            applyWrites(table, planWrites(table, decoded, tombstone = true))
             total += rows.size
         }
         return total

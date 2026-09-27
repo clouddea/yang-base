@@ -241,7 +241,13 @@ data class TableSchema(
      * 让 `information_schema.COLUMNS` 与客户端 introspection 能正常工作。
      */
     val viewSql: String? = null,
+    /** 下一个未使用的物理分区号；删除分区后仍保持单调，不复用编号。 */
+    val nextPartitionId: Long = 0,
 ) {
+    /** 逻辑位置用于裁剪，物理编号用于持久对象键；删分区不能改变后者。 */
+    fun storagePartitionId(index: Int): Long =
+        if (isEnumeratedPartition) partitions[index].partitionId else index.toLong()
+
     /** 是不是视图。 */
     val isView: Boolean get() = viewSql != null
 

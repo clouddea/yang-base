@@ -10,6 +10,10 @@
 
 ---
 
+> **2026-09-27 SQL 回归修复**：DROP PARTITION 保留物理分片编号及二级索引一致性；
+> INSERT 对遗漏列应用 DEFAULT；JOIN 的 GROUP BY/HAVING/ORDER BY 识别输出别名；
+> LAST_INSERT_ID() 保留本语句首个成功插入的自增值；VARBINARY 与 HEX 保留原始字节。
+
 ## 一、一句话版本
 
 **能让 `mysqldump` 与 Connector/J 正常跑通；单表查询、聚合、连接、并集、子查询都能用；

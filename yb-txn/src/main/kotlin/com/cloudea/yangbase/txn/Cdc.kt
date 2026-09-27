@@ -136,7 +136,7 @@ class ChangeStream(
         return (0 until n).map {
             ShardId(
                 com.cloudea.yangbase.common.TableId(table.tableId),
-                com.cloudea.yangbase.common.PartitionId(it.toLong()),
+                com.cloudea.yangbase.common.PartitionId(table.storagePartitionId(it)),
             )
         }
     }

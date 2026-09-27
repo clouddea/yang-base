@@ -551,7 +551,7 @@ class Parser(private val tokens: List<Token>) {
     private fun parseDefaultLiteral(): String? {
         val t = peek()
         return when {
-            t.type == TokenType.STRING -> { next(); "'${t.text}'" }
+            t.type == TokenType.STRING -> { next(); "'${t.text.replace("\\", "\\\\").replace("'", "''")}'" }
             t.type == TokenType.NUMBER -> { next(); t.text }
             t.isKeyword("NULL") -> { next(); null }
             t.isKeyword("CURRENT_TIMESTAMP") -> {
@@ -572,9 +572,9 @@ class Parser(private val tokens: List<Token>) {
         "DOUBLE", "REAL" -> ColumnType.DOUBLE
         "DECIMAL", "NUMERIC" -> ColumnType.DECIMAL
         "BOOL", "BOOLEAN" -> ColumnType.BOOLEAN
-        "VARCHAR", "CHAR", "VARBINARY" -> ColumnType.VARCHAR
+        "VARCHAR", "CHAR" -> ColumnType.VARCHAR
         "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT" -> ColumnType.TEXT
-        "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY" -> ColumnType.BLOB
+        "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY" -> ColumnType.BLOB
         "DATE" -> ColumnType.DATE
         "DATETIME" -> ColumnType.DATETIME
         "TIMESTAMP" -> ColumnType.TIMESTAMP

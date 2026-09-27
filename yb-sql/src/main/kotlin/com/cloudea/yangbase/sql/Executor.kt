@@ -838,14 +838,14 @@ class Executor(private val engine: DatabaseEngine) {
         engine.deleteAll(t, session.readTs(), shards = shardsOf(t, names))
 
     private suspend fun dropPartition(t: TableSchema, names: List<String>): Long {
+        val removed = shardsOf(t, names) // 在任何变更前验证所有分区名。
         val kept = t.partitions.filterNot { p -> names.any { it.equals(p.name, true) } }
-        if (kept.size == t.partitions.size) {
-            throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000", "分区不存在: ${names.joinToString(",")}")
+        if (kept.isEmpty()) {
+            throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000", "不能删除所有分区，请使用 DROP TABLE")
         }
-        val updated = engine.catalog.updateTable(t.copy(partitions = kept))
-        // 删除分区 = 删元数据 + 删对象。**不需要 UPDATE/DELETE**，
-        // 这也是设计文档 §9.4 推荐把它作为冷数据归档手段的原因
-        engine.deleteAll(updated, session0ReadTs(), shards = shardsOf(t, names))
+        // 按旧布局删除目标行（包括二级索引），保留分区的物理编号不变。
+        engine.deleteAll(t, session0ReadTs(), shards = removed)
+        engine.catalog.updateTable(t.copy(partitions = kept))
         return 0
     }
 
@@ -867,8 +867,9 @@ class Executor(private val engine: DatabaseEngine) {
             val def = com.cloudea.yangbase.common.PartitionDef(
                 name = p.name, kind = t.partitionKind,
                 rangeUpperBound = p.upperBound, listValues = p.values,
+                partitionId = updated.nextPartitionId,
             )
-            updated = updated.copy(partitions = updated.partitions + def)
+            updated = updated.copy(partitions = updated.partitions + def, nextPartitionId = updated.nextPartitionId + 1)
         }
         com.cloudea.yangbase.txn.Partitioning.validate(updated)
         return engine.catalog.updateTable(updated)
@@ -891,13 +892,14 @@ class Executor(private val engine: DatabaseEngine) {
             throw SqlException(MySqlErrors.ER_PARSE_ERROR, "42000", "分区不存在: ${action.from.joinToString(",")}")
         }
         val kept = t.partitions.filterNot { it.name.lowercase() in fromNames }
-        val added = action.into.map {
+        val added = action.into.mapIndexed { i, it ->
             com.cloudea.yangbase.common.PartitionDef(
                 name = it.name, kind = t.partitionKind,
                 rangeUpperBound = it.upperBound, listValues = it.values,
+                partitionId = t.nextPartitionId + i,
             )
         }
-        val candidate = t.copy(partitions = kept + added)
+        val candidate = t.copy(partitions = kept + added, nextPartitionId = t.nextPartitionId + added.size)
         com.cloudea.yangbase.txn.Partitioning.validate(candidate)
 
         // 先把数据按**新布局**重写一遍，再切 schema。
@@ -949,9 +951,12 @@ class Executor(private val engine: DatabaseEngine) {
         // 那属于静默改数据，本系统不做）
         val rows = ArrayList<List<Datum>>(stmt.rows.size)
         var skipped = 0
+        val generatedIds = ArrayList<Long?>()
         for (exprs in stmt.rows) {
             try {
-                rows.add(buildRow(session, table, stmt.columns, exprs, readTs))
+                var generated: Long? = null
+                rows.add(buildRow(session, table, stmt.columns, exprs, readTs) { generated = it })
+                generatedIds.add(generated)
             } catch (e: SqlException) {
                 if (stmt.mode != InsertMode.IGNORE) throw e
                 skipped++
@@ -968,12 +973,14 @@ class Executor(private val engine: DatabaseEngine) {
             // 全文索引必须随数据一起维护：只更新数据会让检索返回「曾经匹配、
             // 现在已经改掉」的行——不报错，只给过期结果，比查不到更糟
             syncFullText(session, table, FullTextSupport.Pending.Insert(table, rows), ts)
+            val firstGenerated = generatedIds.firstOrNull { it != null }
+            firstGenerated?.let { session.lastInsertId = it }
             return OkResult(
-                rows.size.toLong(), session.lastInsertId,
+                rows.size.toLong(), firstGenerated ?: 0,
                 "Records: ${rows.size}  Duplicates: 0  Warnings: $skipped",
             )
         }
-        return upsertRows(session, table, rows, stmt, readTs)
+        return upsertRows(session, table, rows, stmt, readTs, generatedIds)
     }
 
     /**
@@ -996,6 +1003,7 @@ class Executor(private val engine: DatabaseEngine) {
         rows: List<List<Datum>>,
         stmt: InsertStmt,
         readTs: ReadTs,
+        generatedIds: List<Long?>,
     ): ExecResult {
         val vars = varsOf(session)
         val pkIdx = table.primaryKeyIndexes
@@ -1009,7 +1017,14 @@ class Executor(private val engine: DatabaseEngine) {
 
         var inserted = 0L
         var changed = 0L
-        for (newRow in rows) {
+        var firstGenerated: Long? = null
+        fun recordGenerated(index: Int) {
+            if (firstGenerated == null) generatedIds[index]?.let {
+                firstGenerated = it
+                session.lastInsertId = it
+            }
+        }
+        for ((rowIndex, newRow) in rows.withIndex()) {
             // 冲突判定：先主键，再唯一键（顺序与 MySQL 一致：主键先命中）
             var conflict: List<Datum>? = byPk[pkKey(newRow)]
             if (conflict == null) {
@@ -1038,6 +1053,7 @@ class Executor(private val engine: DatabaseEngine) {
                     val ts = writeRows(session, table, listOf(newRow), readTs)
                     syncFullText(session, table, FullTextSupport.Pending.Insert(table, listOf(newRow)), ts)
                     byPk[pkKey(newRow)] = newRow
+                    recordGenerated(rowIndex)
                     changed += 2
                 }
 
@@ -1071,12 +1087,13 @@ class Executor(private val engine: DatabaseEngine) {
                     val ts = writeRows(session, table, listOf(newRow), readTs)
                     syncFullText(session, table, FullTextSupport.Pending.Insert(table, listOf(newRow)), ts)
                     byPk[pkKey(newRow)] = newRow
+                    recordGenerated(rowIndex)
                     inserted++
                 }
             }
         }
         // affectedRows 的算法与 MySQL 一致：插入算 1、替换/更新算 2
-        return OkResult(inserted + changed, session.lastInsertId, "Records: ${rows.size}  Duplicates: ${changed}  Warnings: 0")
+        return OkResult(inserted + changed, firstGenerated ?: 0, "Records: ${rows.size}  Duplicates: ${changed}  Warnings: 0")
     }
 
     /**
@@ -1257,6 +1274,7 @@ class Executor(private val engine: DatabaseEngine) {
         explicitColumns: List<String>?,
         exprs: List<Expr>,
         readTs: ReadTs,
+        onGenerated: (Long) -> Unit,
     ): List<Datum> {
         val vars = varsOf(session)
         val row = ArrayList<Datum>(table.columns.size)
@@ -1278,6 +1296,15 @@ class Executor(private val engine: DatabaseEngine) {
             row[idx] = coerce(v, table.columns[idx])
         }
 
+        // 只为未指定的列填默认值；显式 NULL 必须保留 NULL 的语义。
+        for (i in table.columns.indices) {
+            if (i in targetIdx) continue
+            val col = table.columns[i]
+            val default = col.defaultValue ?: continue
+            row[i] = coerce(Eval.eval(Parser.parseExprText(default),
+                EvalContext(table, null, vars, nowMillis = session.statementNowMillis)), col)
+        }
+
         // 自增列
         for (i in table.columns.indices) {
             val c = table.columns[i]
@@ -1285,7 +1312,7 @@ class Executor(private val engine: DatabaseEngine) {
             if (row[i] is Datum.Null) {
                 val next = nextAutoInc(table)
                 row[i] = Datum.I64(next)
-                session.lastInsertId = next
+                onGenerated(next)
             } else {
                 // 显式写了一个自增值：必须把它记成水位的下界。
                 // 不记的话，`INSERT INTO t VALUES (100000)` 之后自增发出的
@@ -3329,7 +3356,7 @@ class Executor(private val engine: DatabaseEngine) {
         val shards = prunedShards(table, where) ?: return null
         if (shards.isEmpty()) return null
         return shards.joinToString(",") { shard ->
-            table.partitions.getOrNull(shard.partition.value.toInt())?.name ?: "p${shard.partition.value}"
+            table.partitions.firstOrNull { it.partitionId == shard.partition.value }?.name ?: "p${shard.partition.value}"
         }
     }
 
