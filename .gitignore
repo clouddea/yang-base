@@ -47,3 +47,6 @@ Thumbs.db
 # 但如果你习惯把数据放在仓库里（例如 `--data-dir ./data`），把下面这行打开——
 # 那是一整个数据库，不是源码。
 # /data/
+
+# 项目
+docs/sql-manual/*
