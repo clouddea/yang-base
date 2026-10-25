@@ -204,6 +204,28 @@ class WritePathCompatibilityTest {
     }
 
     @Test
+    fun `DECIMAL 列参与算术时不能丢掉小数`() {
+        connect().use { c ->
+            c.setup(
+                "DROP TABLE IF EXISTS money_arith",
+                "CREATE TABLE money_arith (id BIGINT NOT NULL, amount DECIMAL(12,2), PRIMARY KEY (id))",
+                "INSERT INTO money_arith VALUES (1, 12.34)",
+            )
+            // 曾经 `amount * 2` 落进整数分支：12.34 → 12，结果是 24 而不是 24.68。
+            // 金额上的静默错值，必须有端到端断言盯着（单元测试只保证表达式层）。
+            assertEquals("24.68", c.text("SELECT amount * 2 FROM money_arith WHERE id = 1"))
+            assertEquals("14.34", c.text("SELECT amount + 2 FROM money_arith WHERE id = 1"))
+            assertEquals("10.34", c.text("SELECT amount - 2 FROM money_arith WHERE id = 1"))
+            assertEquals("0.34", c.text("SELECT amount % 3 FROM money_arith WHERE id = 1"))
+            // 定点 × 定点：MySQL 的结果标度是两者之和
+            assertEquals(
+                "24.6800",
+                c.text("SELECT amount * CAST(2 AS DECIMAL(10,2)) FROM money_arith WHERE id = 1"),
+            )
+        }
+    }
+
+    @Test
     fun `BLOB 列写入后可以按值查到`() {
         connect().use { c ->
             c.setup(

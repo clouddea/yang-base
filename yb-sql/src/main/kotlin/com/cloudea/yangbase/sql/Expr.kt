@@ -7,6 +7,9 @@ import com.cloudea.yangbase.common.SqlException
 import com.cloudea.yangbase.common.TableSchema
 import kotlin.math.abs
 
+/** MySQL DECIMAL 的最大小数位（§11.3 的类型限制）。 */
+private const val MAX_DECIMAL_SCALE = 30
+
 /**
  * 表达式求值上下文。
  * @param schema 行所属的表；无 FROM 的常量查询为 null
@@ -540,44 +543,32 @@ object Eval {
                     else -> throw SqlException(MySqlErrors.ER_NOT_SUPPORTED_YET, "42000", "运算符 $op")
                 }
             }
-            // ★ 两个操作数都是定点数（同标度）：走**定点运算**，不要掉进下面的整数分支。
+            // ★ 任一侧是定点数：走**定点运算**，不要掉进下面的整数分支。
             //
-            // 这里曾经只有 `+`/`-` 是对的，`*` 与 `%` 都执行
-            // `l.asLong() * r.asLong() / 1` —— 既把小数据截断成整数，
-            // 又让**取模算成了乘积**：`SELECT 10.00 % 3.00` 得到 30（而不是 1.00）。
-            // 金额与比例上的静默错值，正是本项目最不能接受的一类。
-            l is Datum.Dec && r is Datum.Dec && l.scale == r.scale -> {
-                val scale = l.scale
-                fun pow() = Datum.pow10Long(scale)
+            // 这里踩过两次坑：
+            // 1. 早期 `*` 与 `%` 都执行 `l.asLong() * r.asLong()`，既把小数截断，
+            //    又让**取模算成了乘积**（`10.00 % 3.00` → 30）。
+            // 2. 后来只处理了「两侧都是 Dec 且标度相同」的情况，于是
+            //    `DECIMAL 列 * 2` 落进整数分支变成 `12 * 2 = 24`（丢掉 0.34），
+            //    而 `Dec * Dec` 的乘法又少除了一次 10^scale（`12.34 * 2.00` → 2468.00）。
+            //    前者是**列与字面量**这种最常见的写法，静默给出错值。
+            //
+            // 现在统一用 BigDecimal 做一次精确定点运算，再由 [decimalResult] 收敛到
+            // `Datum.Dec`。`/` 在上面的分支已按浮点处理（与 MySQL 的 `/` 一致），
+            // 走不到这里。
+            l is Datum.Dec || r is Datum.Dec -> {
+                val a = decimalOf(l)
+                val b = decimalOf(r)
                 when (op) {
-                    "+" -> Datum.Dec(Math.addExact(l.unscaled, r.unscaled), scale)
-                    "-" -> Datum.Dec(Math.subtractExact(l.unscaled, r.unscaled), scale)
-                    // 乘法：结果标度是两者之和，这里再按原标度舍回（MySQL 会给出 s1+s2 位）
-                    "*" -> {
-                        val product = java.math.BigDecimal.valueOf(l.unscaled)
-                            .multiply(java.math.BigDecimal.valueOf(r.unscaled))
-                            .movePointLeft(scale)                       // 还原真实值
-                            .setScale(scale, java.math.RoundingMode.HALF_UP)
-                        Datum.Dec(product.movePointRight(scale).longValueExact(), scale)
-                    }
-                    "%" -> if (r.unscaled == 0L) Datum.Null else Datum.Dec(l.unscaled % r.unscaled, scale)
-                    "/" -> {
-                        if (r.unscaled == 0L) Datum.Null
-                        else {
-                            val q = java.math.BigDecimal.valueOf(l.unscaled)
-                                .divide(java.math.BigDecimal.valueOf(r.unscaled), scale, java.math.RoundingMode.HALF_UP)
-                            Datum.Dec(q.movePointRight(scale).longValueExact(), scale)
-                        }
-                    }
+                    // + / -：结果标度取两者较大值（BigDecimal 天然如此）
+                    "+" -> decimalResult(a.add(b))
+                    "-" -> decimalResult(a.subtract(b))
+                    // *：MySQL 的结果标度是 s1 + s2，BigDecimal 的 multiply 正好保留
+                    "*" -> decimalResult(a.multiply(b))
+                    // %：符号随被除数（与 MySQL 的 MOD 一致）；右操作数为 0 时返回 NULL
+                    "%" -> if (b.signum() == 0) Datum.Null else decimalResult(a.remainder(b))
                     else -> throw SqlException(MySqlErrors.ER_NOT_SUPPORTED_YET, "42000", "运算符 $op")
                 }
-            }
-            // 两个都是定点但**标度不同**：对齐到较大标度再算（同样是定点，不掉浮点）
-            l is Datum.Dec && r is Datum.Dec -> {
-                val scale = maxOf(l.scale, r.scale)
-                val lu = l.unscaled * Datum.pow10Long(scale - l.scale)
-                val ru = r.unscaled * Datum.pow10Long(scale - r.scale)
-                arith(op, Datum.Dec(lu, scale), Datum.Dec(ru, scale))
             }
             else -> {
                 val a = l.asLong(); val b = r.asLong()
@@ -607,6 +598,48 @@ object Eval {
         op(a, b)
     } catch (_: ArithmeticException) {
         throw overflowI64(a, b)
+    }
+
+    /**
+     * 把一个参与定点运算的值转成 [java.math.BigDecimal]。
+     *
+     * 非数值字符串沿用旧的报错口径（1292 / 22007），而不是悄悄当 0——
+     * 后者会让 `WHERE amount + 'abc' > 10` 静默变成另一条查询。
+     */
+    private fun decimalOf(d: Datum): java.math.BigDecimal = when (d) {
+        is Datum.Dec -> java.math.BigDecimal.valueOf(d.unscaled, d.scale)
+        is Datum.I64 -> java.math.BigDecimal.valueOf(d.v)
+        is Datum.Bool -> if (d.v) java.math.BigDecimal.ONE else java.math.BigDecimal.ZERO
+        is Datum.Ts -> java.math.BigDecimal.valueOf(d.millis)
+        is Datum.Str -> d.v.toBigDecimalOrNull() ?: throw SqlException(
+            MySqlErrors.ER_TRUNCATED_WRONG_VALUE, "22007", "无法把 '${d.v}' 转为定点数"
+        )
+        else -> java.math.BigDecimal.valueOf(d.asLong())
+    }
+
+    /**
+     * BigDecimal → [Datum.Dec]。
+     *
+     * MySQL 的 DECIMAL 结果标度上限是 30，这里保持一致；超出 64 位 unscaled 范围时
+     * 明确报 1690，而不是让 `longValueExact()` 抛 `ArithmeticException` 被协议层
+     * 兜成 1105（那会让用户以为数据库自己有缺陷）。
+     */
+    private fun decimalResult(v: java.math.BigDecimal): Datum.Dec {
+        val capped = if (v.scale() > MAX_DECIMAL_SCALE) {
+            v.setScale(MAX_DECIMAL_SCALE, java.math.RoundingMode.HALF_UP)
+        } else {
+            v
+        }
+        val unscaled = try {
+            capped.unscaledValue().longValueExact()
+        } catch (_: ArithmeticException) {
+            throw SqlException(
+                MySqlErrors.ER_DATA_OUT_OF_RANGE, "22003",
+                "DECIMAL 运算结果超出 64 位可表示范围（标度 ${capped.scale()}）：$capped。" +
+                    "请减小数值或降低列标度",
+            )
+        }
+        return Datum.Dec(unscaled, capped.scale())
     }
 
     private fun overflowI64(a: Long, b: Long) = SqlException(
