@@ -1,0 +1,167 @@
+name: OSS conformance (real Aliyun OSS)
+
+# 为什么单独一个 workflow，而不是塞进 ci.yml：
+#
+#  1. **凭据**。真实 OSS 需要一个 AccessKey。PR（尤其是 fork 的 PR）永远不该拿到它，
+#     而 ci.yml 是跑在 `pull_request` 上的。分开放，边界一眼能看出来。
+#  2. **成本与噪音**。每次 push 都打真实云会产生真实账单与网络抖动；
+#     真实后端的一致性只需要**每天一次**，外加手动触发。
+#  3. **信号**。这个 job 红了，说明"跟真实云对不上了"，与代码是否编译通过是两件事。
+#
+# 触发方式：每晚一次 + 手动。**不在 pull_request 上跑。**
+on:
+  workflow_dispatch:
+    inputs:
+      skip_integration:
+        description: '只跑 conformance，跳过集成测试（快速验证凭据）'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 18 * * *' # 18:00 UTC = 02:00 CST
+
+concurrency:
+  group: oss-conformance
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. 后端一致性：同一套用例打在真实 OSS 上 ────────────────────
+  conformance:
+    name: conformance · aliyun OSS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request'
+    env:
+      YANGBASE_CONFORMANCE_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+      # ★ 每个 job 一个**自己的桶**，不共用 `OSS_BUCKET` 本身。
+      # 2026-10-26 就是这么红了一次：本地同时在对 `yangbase-ci` 跑集成测试（每个用例
+      # 启动都会清空整桶），把 CI 这边 conformance 刚写进去的两个对象删了，
+      # 报错是 `ObjectNotFoundException: 对象不存在: conf/<session>/r`——
+      # 看起来像 conformance 的缺陷，其实是两个 runner 在抢同一个桶。
+      YANGBASE_CONFORMANCE_BUCKET: ${{ secrets.OSS_BUCKET }}-conformance
+      YANGBASE_CONFORMANCE_REGION: ${{ secrets.OSS_REGION }}
+      YANGBASE_CONFORMANCE_STYLE: oss
+      YANGBASE_CONFORMANCE_PATH_STYLE: 'false'
+      YANGBASE_CONFORMANCE_NAME: aliyun-oss-ci
+      YANGBASE_CONFORMANCE_ACCESS_KEY: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      YANGBASE_CONFORMANCE_SECRET_KEY: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      # 桶名守卫。集成测试的 IntegrationStore 在启动时会**清空整个桶**，
+      # 而这里的凭据也可能是有人手工配的、指向一个有数据的桶。
+      # 名字里必须带 `-ci`，是一个粗糙但有效的刹车。
+      - name: Guard · bucket must be a dedicated CI bucket
+        env:
+          BUCKET: ${{ secrets.OSS_BUCKET }}-conformance
+        run: |
+          case "$BUCKET" in
+            *-ci|*-ci-*|*ci-test*) echo "bucket=$BUCKET 看起来是专用 CI 桶，继续" ;;
+            *) echo "::error::OSS_BUCKET=$BUCKET 不像专用 CI 桶（名字里要有 -ci）。集成测试会清空整个桶，拒绝继续。"; exit 1 ;;
+          esac
+
+      - name: Run conformance suite against real OSS
+        run: ./gradlew :yb-objectstore:test --tests '*ObjectStoreConformanceTest*' --no-daemon --stacktrace
+
+      - name: Publish conformance matrix
+        if: always()
+        run: |
+          f=yb-objectstore/build/reports/conformance/matrix.md
+          if [ -f "$f" ]; then cat "$f" >> "$GITHUB_STEP_SUMMARY"; else echo "矩阵未生成（测试在它之前就失败了）" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload conformance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-conformance-matrix
+          path: yb-objectstore/build/reports/conformance/matrix.md
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ── 2. 引擎层集成测试：真的读写 OSS ────────────────────────────
+  # 这一步才会压到 LSM/事务/索引层，而不只是 SPI。
+  #
+  # ★ 为什么按用例类**分片**（而且是并行的分片）
+  #
+  # 2026-10-26 第一次真跑：单个 job 跑到 45 分钟被 GitHub 掐掉，而不是断言失败。
+  # 根因是**对象存储的往返**：GitHub runner 到杭州 OSS 单次请求 100–300ms，而每个
+  # 用例类在 setUp 里都要把桶清空（LIST + 逐个 DELETE，且 DELETE 还带一次 HEAD），
+  # 一趟下来 40 分钟就没了。分片不是为了好看，是因为"总时长"这件事会随时钟漂移，
+  # 而单个 job 的时限不会。
+  #
+  # 分片之间**必须用各自的桶**：每个用例类启动时都会清空整个桶，共用桶的后果不是
+  # "慢"，是**互相删掉对方正在读的数据**。桶由 `ensureBucket` 按需创建，名字里带
+  # `-ci-`（守卫要求）。空桶不产生存储费用。分片名出现在 job 名里，红了就知道是谁。
+  integration:
+    name: integration · aliyun OSS · ${{ matrix.group }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: github.event_name != 'pull_request' && !inputs.skip_integration
+    needs: conformance
+    strategy:
+      # 一个分片红了不该把其他分片的结论一起取消：它们测的是不同的东西
+      fail-fast: false
+      matrix:
+        include:
+          # 时间大头：15 个用例，且每个都要重建一份数据集
+          - group: io-budget
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*IoBudgetIntegrationTest*'
+          - group: sql
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*OptimizerIntegrationTest*' --tests '*HashPartitionIntegrationTest*' --tests '*ManualSqlRegressionIntegrationTest*'
+          - group: observability
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*ObservabilityIntegrationTest*' --tests '*MetricsNoIoIntegrationTest*' --tests '*SkipIndexIntegrationTest*'
+          # 多 CN 要起 3 个 MS 节点 + 2 个 CN，最吃"共识在高延迟后端上的收敛"
+          - group: multi-cn
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*MultiCnCoordinationTest*'
+          - group: objectstore
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*S3IntegrationTest*'
+    env:
+      YB_S3_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+      YB_S3_BUCKET: ${{ secrets.OSS_BUCKET }}-${{ matrix.group }}
+      YB_S3_REGION: ${{ secrets.OSS_REGION }}
+      YB_S3_PATH_STYLE: 'false'
+      YB_S3_OSS: 'true'
+      YB_S3_ACCESS_KEY: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      YB_S3_SECRET_KEY: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Guard · bucket must be a dedicated CI bucket
+        env:
+          BUCKET: ${{ secrets.OSS_BUCKET }}-${{ matrix.group }}
+        run: |
+          case "$BUCKET" in
+            *-ci|*-ci-*|*ci-test*) echo "bucket=$BUCKET ok" ;;
+            *) echo "::error::OSS_BUCKET=$BUCKET 不像专用 CI 桶（名字里要有 -ci）。集成测试会清空整个桶，拒绝继续。"; exit 1 ;;
+          esac
+
+      - name: Run engine integration tests against real OSS (${{ matrix.group }})
+        run: ${{ matrix.cmd }}
+
+      - name: Upload integration reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-integration-${{ matrix.group }}
+          path: |
+            yb-server/build/reports/tests/integrationTest/**
+            yb-server/build/test-results/integrationTest/**
+          retention-days: 7
+          if-no-files-found: ignore

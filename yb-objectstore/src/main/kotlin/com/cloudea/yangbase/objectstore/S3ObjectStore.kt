@@ -481,7 +481,25 @@ class S3ObjectStore(
                     if (exists(it, bucket)) return false
                     it.createBucket(
                         software.amazon.awssdk.services.s3.model.CreateBucketRequest.builder()
-                            .bucket(bucket).build()
+                            .bucket(bucket)
+                            // ★ 地域约束**必须按后端自己的写法给**。
+                            //
+                            // 2026-10-26 在 OSS 上第一次真正建桶时撞到：不传或传 S3 风格的值
+                            // 都是 400 `The specified location-constraint is not valid`。
+                            // 之前的代码没传，于是“建桶”这条路对 OSS 从来没成功过——
+                            // 能跑只是因为桶是事先在控制台建好的。于是任何“换一个桶试试”
+                            // （包括 CI 的分片桶、本地的一次性桶）都在启动阶段就死掉，
+                            // 而错误信息看起来像地域写错了。
+                            .apply {
+                                bucketLocationConstraint(endpoint, region)?.let { lc ->
+                                    createBucketConfiguration(
+                                        software.amazon.awssdk.services.s3.model.CreateBucketConfiguration.builder()
+                                            .locationConstraint(lc)
+                                            .build()
+                                    )
+                                }
+                            }
+                            .build()
                     )
                     true
                 }
@@ -490,6 +508,22 @@ class S3ObjectStore(
                 if (e.statusCode() == 409) false
                 else throw ObjectStoreException("创建 bucket '$bucket' 失败: ${e.statusCode()} ${e.awsErrorDetails()?.errorMessage()}", e)
             }
+        }
+
+        /**
+         * 建桶时必须给的地域约束，`null` 表示不给（后端不接受）。
+         *
+         * 三种情形各不相同，而且都只能靠实测得知：
+         * - **阿里云 OSS**：要它自己的写法 `oss-cn-hangzhou`（S3 风格的 `cn-hangzhou` 会被拒）；
+         * - **AWS**：`us-east-1` 是特例，**不能**传（传了反而 400），其他地域要传；
+         * - **MinIO / 自建网关**：通常不认这个字段，不给最安全。
+         */
+        private fun bucketLocationConstraint(endpoint: String?, region: String): String? = when {
+            endpoint?.contains("aliyuncs.com", ignoreCase = true) == true ->
+                if (region.startsWith("oss-")) region else "oss-$region"
+            endpoint == null || endpoint.contains("amazonaws.com", ignoreCase = true) ->
+                if (region == "us-east-1") null else region
+            else -> null
         }
 
         /** 桶存在且可访问。用 HEAD 探测（不返回内容，最便宜的存在性判断）。 */

@@ -266,22 +266,55 @@ class ObjectStoreConformanceTest {
     fun conformance(): List<DynamicTest> = rigs().map { rig ->
         DynamicTest.dynamicTest("conformance · ${rig.name}") {
             if (rig.note.isNotBlank()) note(rig.name, rig.note)
-            val store = rig.open()
+            // 真实后端前面套一层 L1 重试层（[RetryingObjectStore]）——这正是**系统实际使用的组合**。
+            //
+            // 为什么不是裸 store：生产里所有后端都在 L1 重试层之下运行，而真实云会偶尔
+            // 掐断 keep-alive 连接（阿里云 OSS 上稳定复现：一串并发条件写之后，
+            // 紧接着那条普通 PUT 拿到 `Unexpected end of file`）。裸 store 没有重试，
+            // 于是这一类**瞬时 IO** 会被记成「不符合契约」——那是把噪音当信号。
+            //
+            // 重试层不会掩盖语义问题：409/412 是确定结论，它按规定不重试
+            // （见 S3FailureClassificationTest）；「声称支持 CAS 却没做到」也不会因为
+            // 重试就变成成功。
+            val store: ObjectStore = RetryingObjectStore(rig.open(), maxAttempts = 3, deadlineMillis = 30_000)
             // 声明的东西必须与实例上的一致：后端若在装配时"偷偷"降级或升级能力，
             // 上层按声明做的判断就全错了，而这种错不会以异常的形式出现。
             assertEquals(rig.declared, store.caps, "后端声明的能力与实例暴露的能力不一致")
             val prefix = "conf/${UUID.randomUUID().toString().take(8)}"
             try {
                 val failures = ArrayList<String>()
-                for (check in checks) {
+                // `YANGBASE_CONFORMANCE_ONLY=key charset,atomic` 只跑名字匹配的用例。
+                // 打真实后端时这是排障入口：某条用例红了，你得能单独重跑它，
+                // 而不是每次都等整片矩阵跑完再猜是不是顺序影响。
+                val only = System.getenv("YANGBASE_CONFORMANCE_ONLY")
+                    ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
+                val selected = if (only.isNullOrEmpty()) checks
+                else checks.filter { c -> only.any { c.name.contains(it, ignoreCase = true) } }
+                for (check in selected) {
                     val skip = check.skip(store.caps)
                     if (skip != null) {
                         record(rig.name, check.name, Outcome.SKIP, skip)
                         continue
                     }
+                    // 一次「连接被后端掐断」不算不符合契约：真实后端会关空闲连接，
+                    // 而这一层测的是**裸 store**（没有 RetryingObjectStore 兜底）。
+                    // 阿里云 OSS 上这个现象是稳定复现的：一串并发条件写返回 409 之后，
+                    // 紧接着那条普通 PUT 会拿到 `Unexpected end of file`。
+                    // 逐条重试一次并在矩阵里注明——**重试成功不等于没发生过**，
+                    // 所以它必须以可见的形式出现在结果里，而不是被悄悄吞掉。
+                    var connectionDropped = false
                     try {
-                        runBlocking { check.body(store, prefix) }
-                        record(rig.name, check.name, Outcome.PASS, "")
+                        try {
+                            runBlocking { check.body(store, prefix) }
+                        } catch (e: Throwable) {
+                            if (!isConnectionDropped(e)) throw e
+                            connectionDropped = true
+                            runBlocking { check.body(store, prefix) }
+                        }
+                        record(
+                            rig.name, check.name, Outcome.PASS,
+                            if (connectionDropped) "连接被后端中断一次，重试后通过" else "",
+                        )
                     } catch (e: Throwable) {
                         record(rig.name, check.name, Outcome.FAIL, e.message ?: e::class.simpleName ?: "?")
                         failures += "  ✗ ${check.name}：${e.message ?: e::class.simpleName}\n${e.stackTraceToString().lines().take(6).joinToString("\n") { "      $it" }}"
@@ -295,6 +328,18 @@ class ObjectStoreConformanceTest {
                 rig.close(store)
             }
         }
+    }
+
+    /**
+     * 这个异常是不是「后端把连接掐了」这一类（而不是语义不符合契约）。
+     *
+     * 只在**重试一次**的范围内使用：连接被掐断是可重试的传输问题，
+     * 与「后端声称支持 CAS 却没做到」有本质区别，后者必须让测试红。
+     */
+    private fun isConnectionDropped(e: Throwable): Boolean {
+        val text = generateSequence(e) { it.cause }.mapNotNull { it.message }.joinToString(" ")
+        return listOf("Unexpected end of file", "Connection reset", "Broken pipe", "Connection closed")
+            .any { text.contains(it, ignoreCase = true) }
     }
 
     /** 把自己写进去的键删干净。真实后端上这一步是**省钱**，不是洁癖。 */
@@ -404,6 +449,10 @@ class ObjectStoreConformanceTest {
             note = "endpoint=$endpoint bucket=$bucket region=$region style=${style ?: "s3"} " +
                 "pathStyle=${pathStyle ?: "auto"}",
             open = {
+                // ★ 桶可能在这个后端上**还没存在**（CI 的每个分片用自己的桶，本地换一个
+                // 桶名也是常事）。没有这一步，一个新桶会让整套用例全部变成「桶不存在」，
+                // 看上去像是后端不兼容。ensureBucket 是幂等的：已存在时只花一次 HEAD。
+                S3ObjectStore.ensureBucket(bucket, endpoint, region, ak, sk, pathStyle)
                 S3ObjectStore.create(
                     bucket = bucket,
                     endpoint = endpoint,
@@ -476,6 +525,7 @@ class ObjectStoreConformanceTest {
                             cell == null -> " · |"
                             cell.outcome == Outcome.SKIP -> " ${cell.outcome.mark} ${cell.detail.replace("|", "\\|")} |"
                             cell.outcome == Outcome.FAIL -> " ${cell.outcome.mark} |"
+                            cell.detail.isNotBlank() -> " ${cell.outcome.mark} ${cell.detail.replace("|", "\\|")} |"
                             else -> " ${cell.outcome.mark} |"
                         },
                     )
