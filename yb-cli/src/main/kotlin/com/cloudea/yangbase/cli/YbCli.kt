@@ -108,21 +108,24 @@ object YbCli {
 
             对象存储选项（三者必须成套）:
               --fs <dir>              使用本地目录（开发用）
+              --provider <id>         后端预设：aws（默认）/ minio / oss / cos / obs / r2 / b2。
+                                      它决定端点模板、寻址风格与能力声明（显式参数仍优先）。
+                                      用 oss/cos/obs/b2 时可以省略 --endpoint。
               --endpoint <url>        S3 兼容端点（MinIO / OSS / COS / R2）
               --bucket <name>         bucket 名
-              --region <name>         区域，默认 us-east-1
+              --region <name>         区域；默认值由 --provider 决定（aws 为 us-east-1）
               --access-key <k>        访问密钥
               --secret-key <k>        访问密钥
               --path-style <b>        寻址风格：true=路径式（MinIO 默认）/ false=虚拟主机式
-              --s3-oss                后端是阿里云 OSS：改用它的原语（原子创建走
-                                      x-oss-forbid-overwrite、无 ETag CAS），
+              --s3-oss                （兼容保留）等价于 --provider oss：原子创建走
+                                      x-oss-forbid-overwrite、无 ETag CAS，
                                       寻址默认切到三级域名
               --i-accept-nonatomic-pointer-switch
                                       接受这个后端上协调写入失去原子性（单写者部署，
                                       与 yb-server 的同名开关含义一致）。**写命令**
                                       （restore / pitr / gc --delete 之外的写路径）
                                       在没有 ETag CAS 的后端上需要它，否则明确报错
-              也可用环境变量 YB_S3_ENDPOINT / YB_S3_BUCKET / YB_S3_ACCESS_KEY /
+              也可用环境变量 YB_S3_PROVIDER / YB_S3_ENDPOINT / YB_S3_BUCKET / YB_S3_ACCESS_KEY /
               YB_S3_SECRET_KEY / YB_S3_PATH_STYLE / YB_S3_OSS
 
             backup / restore / pitr 选项:
@@ -178,26 +181,36 @@ object YbCli {
 
     private fun openStore(o: Map<String, String>): ObjectStore {
         o["fs"]?.let { return LocalFileObjectStore(java.nio.file.Path.of(it)) }
+        val providerId = o["provider"] ?: System.getenv("YB_S3_PROVIDER")
         val endpoint = o["endpoint"] ?: System.getenv("YB_S3_ENDPOINT")
-        if (endpoint != null) {
+        // 有 endpoint **或** 指定了 provider（aws 之外）才走 S3：
+        // 老用法只给 --endpoint；新用法 `--provider oss --bucket x --access-key …`
+        // 可以省掉 endpoint（由预设模板按 region 展开）。
+        if (endpoint != null || (providerId != null && !providerId.equals("aws", ignoreCase = true))) {
             val bucket = o["bucket"] ?: System.getenv("YB_S3_BUCKET") ?: "yangbase"
+            // 与服务端共用同一个解析函数（显式参数 > 预设默认值）。
+            // 两处各写一遍必然漂移，而漂移的症状是"服务端能连、CLI 连不上"这种最难查的问题
+            val target = com.cloudea.yangbase.objectstore.S3Target.resolve(
+                providerId = providerId,
+                endpoint = endpoint,
+                region = o["region"] ?: System.getenv("YB_S3_REGION"),
+                pathStyle = (o["path-style"] ?: System.getenv("YB_S3_PATH_STYLE"))?.toBooleanStrictOrNull(),
+                legacyOssFlag = o.containsKey("s3-oss") || System.getenv("YB_S3_OSS") == "true",
+            )
+            if (target.endpoint == null) {
+                throw CliError("后端『${target.provider.id}』需要 --endpoint：${target.provider.note}")
+            }
             return S3ObjectStore.create(
                 bucket = bucket,
-                endpoint = endpoint,
-                region = o["region"] ?: System.getenv("YB_S3_REGION") ?: "us-east-1",
+                endpoint = target.endpoint,
+                region = target.region,
                 accessKey = o["access-key"] ?: System.getenv("YB_S3_ACCESS_KEY"),
                 secretKey = o["secret-key"] ?: System.getenv("YB_S3_SECRET_KEY"),
-                // 寻址风格：MinIO/自建网关要路径式（默认），阿里云 OSS 要虚拟主机式
-                pathStyle = (o["path-style"] ?: System.getenv("YB_S3_PATH_STYLE"))?.toBooleanStrictOrNull(),
-                // 后端是阿里云 OSS：改用它的原语（`x-oss-forbid-overwrite` 做原子创建、
-                // 如实声明「无 ETag CAS」）。只读命令（ls/shards/cost/recover-check）
-                // 用不上条件写，但 `gc --delete` / `restore` / `pitr` 会写——
-                // 在那个后端上按 S3 语义发条件头会被拒（400），所以这里必须能声明
-                caps = if (o.containsKey("s3-oss") || System.getenv("YB_S3_OSS") == "true") {
-                    com.cloudea.yangbase.objectstore.ObjectStoreCapabilities.OSS
-                } else {
-                    com.cloudea.yangbase.objectstore.ObjectStoreCapabilities.FULL
-                },
+                pathStyle = target.pathStyle,
+                // OSS 的原语与 S3 不同（没有 ETag CAS、原子创建走 x-oss-forbid-overwrite）。
+                // 只读命令用不上条件写，但 `gc --delete` / `restore` / `pitr` 会写——
+                // 按 S3 语义发条件头在 OSS 上会被直接拒绝（400）
+                caps = target.caps,
             )
         }
         throw CliError("必须指定对象存储：--fs <dir> 或 --endpoint <url>")
