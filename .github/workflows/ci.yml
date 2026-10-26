@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消旧的运行，避免堆积
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 编译 + 单元测试 + 覆盖率门禁 ───────────────────────────────
+  # `./gradlew build` 会跑 check → test，并在 :yb-server 上执行
+  # koverVerify（分支覆盖率 ≥ 50%，按聚合测量，见 yb-server/build.gradle.kts）
+  build:
+    name: build · test · coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build, test, verify coverage
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ── 集成测试 ──────────────────────────────────────────────────
+  # ⚠️ `integrationTest` **不在 build 里**（独立源集），必须单独跑。
+  # 这些用例走项目内置的 S3 兼容服务器（真实 HTTP + 真实条件写），
+  # 不需要 Docker，也不需要外部对象存储。
+  integration:
+    name: integration tests · embedded S3
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run integration tests
+        run: ./gradlew integrationTest --no-daemon --stacktrace
+
+      - name: Upload integration reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-reports
+          path: |
+            **/build/reports/tests/integrationTest/**
+            **/build/test-results/integrationTest/**
+          retention-days: 7
+          if-no-files-found: ignore

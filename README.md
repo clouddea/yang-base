@@ -1,5 +1,10 @@
 # YangBase
 
+[![CI](https://github.com/clouddea/yang-base/actions/workflows/ci.yml/badge.svg)](https://github.com/clouddea/yang-base/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![JDK](https://img.shields.io/badge/JDK-21-orange.svg)](https://adoptium.net/)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.1-7F52FF.svg)](https://kotlinlang.org/)
+
 **一个完全构建在对象存储之上的分布式 TP 数据库** —— Kotlin 实现，兼容 MySQL 协议。
 
 > 📖 完整设计见 [docs/yangbase-design.md](docs/yangbase-design.md)（3007 行 / §0–§17 + 4 附录）。
