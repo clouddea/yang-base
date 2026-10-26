@@ -78,7 +78,11 @@ class MysqldumpCompatTest {
     private fun threadDump(): String = runCatching {
         val jcmd = File(System.getProperty("java.home"), "bin/jcmd")
         if (!jcmd.canExecute()) return@runCatching "<找不到 jcmd，跳过线程转储>"
-        val out = File.createTempFile("yangbase-tdump", ".txt")
+        // ⚠️ `Thread.dump_to_file` 拒绝覆盖已存在的文件（用 CREATE_NEW 打开），
+        // 而 `File.createTempFile` 恰恰先把文件建出来了——上一版因此拿到一份空转储，
+        // 报错信息里那一节是空的。这里改成「新目录 + 尚不存在的文件名」。
+        val dir = Files.createTempDirectory("yangbase-tdump")
+        val out = File(dir.toFile(), "threads.txt")
         val p = ProcessBuilder(
             jcmd.absolutePath,
             ProcessHandle.current().pid().toString(),
@@ -88,7 +92,8 @@ class MysqldumpCompatTest {
         ).redirectErrorStream(true).start()
         p.waitFor(20, TimeUnit.SECONDS)
         val text = runCatching { out.readText() }.getOrDefault("<读不到转储>")
-        out.delete()
+        dir.toFile().deleteRecursively()
+        if (text.isBlank()) return@runCatching "<jcmd 产出了空文件：Thread.dump_to_file 可能拒绝写目标路径>"
         text
     }.getOrElse { "<线程转储失败：${it::class.simpleName}: ${it.message}>" }
 
@@ -344,10 +349,35 @@ class MysqldumpCompatTest {
             val server2 = YangBaseServer.forTesting(
                 store = com.cloudea.yangbase.objectstore.LocalFileObjectStore(dir2), port = 0,
             )
+            // 协议级 trace：只在这个用例里打开，输出走 stderr（Gradle 会收进测试日志）。
+            // 客户端挂住时，"服务端收到了哪一步"是唯一能定位的线索。
+            System.setProperty("yb.mysql.trace", "1")
             server2.start()
             // 「先证明服务端能服务，再让客户端上」：探针失败时立刻断在这里，
             // 报错指向服务端；探针通过而客户端仍挂 → 责任方是客户端侧。
             val greeting = probeGreeting(server2.boundPort)
+
+            // 冒烟：先用同一个客户端跑一条 `SELECT 1`。
+            // 这一步把「连不上」与「灌数据时卡住」分开——
+            // 前者是握手/协议问题，后者是某条 SQL 或结果处理的问题。
+            run {
+                val smokeOut = File.createTempFile("yangbase-smoke", ".log")
+                val smoke = ProcessBuilder(
+                    mysqlClient!!.absolutePath, "-h", "127.0.0.1", "-P", "${server2.boundPort}", "-u", "root",
+                    "--password=", "--connect-timeout=10", "--protocol=TCP", "--unbuffered",
+                    "-e", "SELECT 1",
+                ).redirectOutput(smokeOut).redirectErrorStream(true).start()
+                val finished = smoke.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+                val smokeText = runCatching { smokeOut.readText() }.getOrDefault("")
+                smokeOut.delete()
+                if (!finished) runCatching { smoke.destroyForcibly() }
+                assertTrue(
+                    finished && smoke.exitValue() == 0,
+                    "客户端连不上 server2（SELECT 1 冒烟失败）：" +
+                        if (finished) "退出码 ${smoke.exitValue()}，输出：$smokeText"
+                        else "30s 内没有退出，输出：$smokeText",
+                )
+            }
             val restoreOut = File.createTempFile("yangbase-restore", ".log")
             try {
                 val restore = ProcessBuilder(
@@ -360,9 +390,11 @@ class MysqldumpCompatTest {
                     "--connect-timeout=10",
                     // 强制 TCP：不依赖 socket 路径探测，`-h 127.0.0.1` 的行为才确定。
                     "--protocol=TCP",
-                    // 逐条打印正在执行的语句。挂住时这是**唯一**能说明
-                    // 「它走过了握手、停在第六条 SQL」的证据。
+                    // 逐条打印语句，并且**每条都落到磁盘**。少了 `--unbuffered`，
+                    // 输出会卡在 stdio 的 4KB 缓冲里，进程被 kill 时一个字也留不下——
+                    // 上一版就是这么拿到「0 字符输出」的。
                     "--verbose",
+                    "--unbuffered",
                 )
                     // ⚠️ 输出必须落到**文件**，不能用管道 + readBytes()：
                     // readBytes() 会阻塞到子进程关掉 stdout，且**没有任何超时**。
@@ -421,6 +453,7 @@ class MysqldumpCompatTest {
                     assertEquals(1L, (c2.value("SELECT COUNT(*) FROM vpaid") as Number).toLong())
                 }
             } finally {
+                System.clearProperty("yb.mysql.trace")
                 runCatching { server2.stop() }
                 runCatching { dir2.toFile().deleteRecursively() }
                 runCatching { dump.delete() }

@@ -110,6 +110,9 @@ class MysqlServer(
                     Thread.ofVirtual().name("yb-conn-$id").start {
                         val conn = MysqlConnection(id, socket, engine, executor, config, observer)
                         liveConnections[id] = conn
+                        if (System.getProperty("yb.mysql.trace") != null) {
+                            System.err.println("[yb-mysql][trace] accepted #$id from ${runCatching { socket.remoteSocketAddress }.getOrNull()}")
+                        }
                         try {
                             conn.run()
                         } catch (t: Throwable) {
@@ -189,14 +192,28 @@ class MysqlConnection(
         var pos: Int = 0,
     )
 
+    /**
+     * 协议级 trace（`-Dyb.mysql.trace=1`）。
+     *
+     * 存在的理由很具体：`mysql` 客户端在 CI 上灌 dump 时挂住，客户端侧输出为 0
+     * （stdio 缓冲在进程被 kill 时全丢），于是**只能从服务端这一侧看它走到了哪一步**。
+     * 正常运行时它是关的，开销为零。
+     */
+    private fun trace(msg: String) {
+        if (System.getProperty("yb.mysql.trace") != null) System.err.println("[yb-mysql][trace] #$id $msg")
+    }
+
     fun run() {
         try {
             // 协议本身是「每连接串行」的，而执行器是挂起的；
             // 用 runBlocking 把两者接起来最直接——每条连接已经独占一个虚拟线程，
             // 阻塞它没有代价。
             kotlinx.coroutines.runBlocking {
+                trace("opened, peer=${peerName()}")
                 sendHandshake()
+                trace("greeting sent (caps=0x%08x)".format(serverCapabilities()))
                 if (!readHandshakeResponse()) return@runBlocking
+                trace("handshake ok: user='$user' db=$database charset=${session.charset} caps=0x%08x".format(capabilities))
                 commandLoop()
             }
         } finally {
@@ -345,6 +362,7 @@ class MysqlConnection(
 
             val cmd = payload[0].toInt() and 0xFF
             val args = payload.copyOfRange(1, payload.size)
+            trace("cmd=0x%02x len=%d %s".format(cmd, payload.size, runCatching { session.charset.decode(args).take(120) }.getOrDefault("<binary>")))
             try {
                 when (cmd) {
                     Packets.COM_QUIT -> return
