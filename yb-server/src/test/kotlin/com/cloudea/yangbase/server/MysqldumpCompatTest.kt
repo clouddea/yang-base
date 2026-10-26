@@ -287,6 +287,14 @@ class MysqldumpCompatTest {
             try {
                 val restore = ProcessBuilder(
                     mysqlClient!!.absolutePath, "-h", "127.0.0.1", "-P", "${server2.boundPort}", "-u", "root",
+                    // 显式空密码：不传 -p 时客户端可能反过来**交互式**索要密码，
+                    // 而它从 /dev/tty 读，所以把 dump 喂给 stdin 也解救不了它——
+                    // CI 上就是这样 0 输出、120s 不退出。
+                    "--password=",
+                    // 连不上时 10s 内快速失败并打印原因，而不是挂到测试超时。
+                    "--connect-timeout=10",
+                    // 强制 TCP：不依赖 socket 路径探测，`-h 127.0.0.1` 的行为才确定。
+                    "--protocol=TCP",
                 )
                     // ⚠️ 输出必须落到**文件**，不能用管道 + readBytes()：
                     // readBytes() 会阻塞到子进程关掉 stdout，且**没有任何超时**。
