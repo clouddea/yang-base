@@ -343,7 +343,7 @@ S1 只有严格客户端才校验；S2 的用例全写表级主键；S3 只有�
 
 ### 第一轮修掉的（清单）
 
-审计了 `README.md` / `PROJECT_GUIDE.md` / `docs/README.md` / `docs/compatibility.md` / `docs/yangbase-design.md` / `scripts/`，修掉的主要项：
+审计了 `README.md` / `PROJECT_GUIDE.md` / `docs/README.md` / `docs/zh/compatibility.md` / `docs/zh/yangbase-design.md` / `scripts/`，修掉的主要项：
 
 - **快速开始的命令跑不起来**：`--data-dir` 示例缺 `--i-know-this-is-not-durable`（服务端硬拒绝）。
 - **README 自相矛盾**：MS 既"✅ 已实现"又"❌ 刻意排在最后"。

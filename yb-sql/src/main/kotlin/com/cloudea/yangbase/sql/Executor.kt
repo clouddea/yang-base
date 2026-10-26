@@ -346,7 +346,7 @@ class OkResult(
  * （设计文档 §10.2 R1–R6）。
  */
 /**
- * 本系统**如实提供**的隔离级别（见 [docs/compatibility.md](../../../../../../../docs/compatibility.md) §4.1：
+ * 本系统**如实提供**的隔离级别（见 [docs/zh/compatibility.md](../../../../../../../docs/zh/compatibility.md) §4.1：
  * 实现是快照隔离，对外报告这一档）。
  *
  * 请求落在这里面不算降级；落在外面（`READ COMMITTED` / `READ UNCOMMITTED`）会被记进

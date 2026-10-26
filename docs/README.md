@@ -1,97 +1,35 @@
-# YangBase 文档
+# YangBase Documentation
 
-一个完全构建在对象存储之上的分布式 TP 数据库的设计文档。
+[English](en/README.md) | [简体中文](zh/README.md)
 
-## 目录
+YangBase is a transactional (TP) database that keeps **all durable state in object storage**. The compute layer is stateless and can be destroyed and rebuilt at any time; the object store is the single source of truth.
 
-| 文档 | 内容 | 状态 |
+All documentation is maintained in two languages:
+
+| Language | Entry point | What's there |
 |---|---|---|
-| [yangbase-design.md](yangbase-design.md) | 完整设计文档（3007 行 / §0–§17 + 4 附录） | **已评审确认** v0.1（§16.1 的九项决策，2026-09-23） |
-| [compatibility.md](compatibility.md) | **面向使用者**的兼容性与限制清单（迁移前必读；对应 §11.2 / §11.3） | 随实现持续更新 |
-| [user-guide.md](user-guide.md) | **面向使用者**的操作手册（怎么建表、怎么写查询、怎么部署与运维） | 随实现持续更新 |
-| [index-bench.md](index-bench.md) | 全部索引的 SQL 性能门禁、MinIO/OSS 运行方式 | 18 场景，结果与 IO 双重验收 |
-| [code-review-2026-09.md](code-review-2026-09.md) | **回归清单**：一次系统性审查的 59 条发现项、每条"当初为什么会发生"与"哪条测试盯着它" | 两轮处置完毕（2026-09-25） |
+| **English** | [docs/en/](en/README.md) | Getting started, architecture overview, compatibility and limitations |
+| **简体中文** | [docs/zh/](zh/README.md) | Full design document (3000+ lines, §0–§17), user guide, compatibility list, index benchmarks, development process |
 
-> 项目当前进度（哪些已实现、哪些还没做）统一维护在
-> [../PROJECT_GUIDE.md](../PROJECT_GUIDE.md) 的「版本状态」一节，本文件不重复。
+> The Chinese design document is the authoritative design record. The English architecture overview is a faithful summary of it, with section references back to the source (`> Source: §x.y`). If they ever disagree, the Chinese document wins — and that is a bug worth reporting.
 
-## 一句话定位
+## Where to start
 
-> 面向**低频、读多写少、需要事务与 SQL** 的应用，让「数据层的成本」与「计算实例的存活时间」彻底解耦。
-> 不试图在性能上击败本地盘数据库，而是消解掉「没有客户的时候仍要为数据库付一笔固定费用」这个问题。
+- **Just want to run it?** → [Getting Started](en/getting-started.md)
+- **Want to know how it works?** → [Architecture Overview](en/architecture.md)
+- **Migrating an existing MySQL app?** → [Compatibility and Limitations](en/compatibility.md)
+- **Want to contribute?** → [CONTRIBUTING.md](../CONTRIBUTING.md) and [Development process](zh/development-process.md) (Chinese)
 
-## 背景
+## Documentation status
 
-云厂商 ECS 在节假日有大额折扣、续费时回归原价，传统「ECS + 本地盘数据库」的架构因此被计费周期绑架：续费贵就得重新购机、全量搬迁、停机。而对象存储单价极低、与计算完全解耦、自带多副本与强一致读——把持久状态放进去，计算层就能随时销毁重建，跟随折扣周期迁移。
-
-代价是对象存储的物理约束：**对象级接口（无法原地更新）、高 RTT、按请求计费**。整个设计就是围绕这三条约束展开的。
-
-## 核心设计选择
-
-> ✅ **全部决策已于 2026-09-23 评审确认**（含 §16.1 的九项）。决策记录与被否决的方案见设计文档 §16.1。
-
-| # | 决策 | 选择 |
+| Document | English | 简体中文 |
 |---|---|---|
-| D1 | 协调模型 | **双模式，部署时选择**：轻量常驻元数据服务（Raft×3）或纯对象存储 CAS（零常驻成本）——实现现状见下方注 |
-| D3 | 写路径 | 单写者日志流 + LSM |
-| D5 | 提交延迟 | 组提交，三档可配；**出厂默认 `sync`（RPO=0）**，`async` 必须显式声明（实现现状：`async` 尚未实现，服务端明确拒绝；可用的是 `sync` / `batch`，见兼容性清单 §4.5.3） |
-| D6 | SST 布局 | **索引块与数据块分离成两个对象** |
-| D7 | 事务 | MVCC(快照隔离) + 单分片串行 + 跨分片 2PC |
-| D9 | B+ 树索引 | 以 LSM 实现，对外提供 B+ 树语义 |
-| D10 | 全文索引 | 自研段式倒排索引（FST + postings 分块 + WAND + BM25），不引入 Lucene 兜底 |
-| D11 | 分区 | 分区即写入分片（与 MySQL 语义天然对齐） |
-| D12 | 隔离级别 | 默认 RR = 快照隔离，**但必须如实报告语义并显式警告与 InnoDB 的差异** |
-| D13 | 构建系统 | Gradle Kotlin DSL 多模块 |
-| D14 | Compaction 布局 | **L1 及以下强制 leveled** —— 这是 `COUNT(*)` 精确性的语义前提，不是性能偏好（§8.9.3） |
+| Getting started | ✅ | ✅ [user-guide.md](zh/user-guide.md) (much more detailed) |
+| Architecture overview | ✅ | ✅ [yangbase-design.md](zh/yangbase-design.md) (full design) |
+| Compatibility & limits | ✅ | ✅ [compatibility.md](zh/compatibility.md) |
+| Index benchmarks | — | ✅ [index-bench.md](zh/index-bench.md) |
+| Development process | — | ✅ [development-process.md](zh/development-process.md) |
+| Code review regression list | — | ✅ [code-review-2026-09.md](zh/code-review-2026-09.md) |
+| SQL test manual | — | ✅ [sql-manual/](sql-manual/CASES.md) |
 
-> ⭐ **`SELECT COUNT(*)` 必须做到 0 次 GET**（§8.9）。朴素实现在 10 亿行表上要 ~100,000 次 GET，本设计做到 0 次且**结果精确**。三个机制叠加，其中最关键的一个利用了本架构的独有性质：**单写者 ⇒ 文件内 `commit_ts` 沿块序单调 ⇒ 一个 `read_ts` 至多切到每个文件的一个数据块**，而块级元数据已在内存中。
-
-完整决策表含备选方案与代价，见设计文档 §0.4。
-
-> **D1 的实现现状**：两套多 CN 实现都已交付（`ObjectStoreCoordination`、`MetaServiceClient`），
-> 另外还有一个**单 CN 用的 `SingleProcessCoordination`——它是出厂的 `--coord-mode` 默认值**
-> （单 CN 部署不需要常驻 MS，也不需要每次提交多几个 RTT）。三种模式见兼容性清单 §4.4.2。
-
-## 实现过程中仍需持续守护的 9 条
-
-这些是**一旦确定就极难更改**的设计前提：
-
-1. §5.1 对象存储布局 —— 键结构上线后无法迁移
-2. §5.2 规则 2（索引与数据分离）—— 违反它将摧毁点查性能的前提
-3. §6.5 Manifest 一致性的推理链 —— 最可能出现微妙数据错误的点
-4. §6.3.4 提交延迟的三档设计 —— 出厂默认 `sync`、`async` 必须显式声明
-5. §7.4 + §16.1 Q8 的**三件必做事**（如实报告 / 主动警告 / 迁移检查工具）—— 少做任何一件，默认 RR 的决定就不成立
-6. §8.6.5 MVCC 与倒排索引的集成方式 —— 事后无法补救
-7. §9.3 分区即分片 —— 决定扩展模型与用户的使用方式
-8. §3.3.1 CAS 与低延迟的分层解耦 —— 决定能否同时拿到低延迟与正确性
-9. §8.9.3 计数去重 + D14 leveled 约束 —— **最危险的静默错误点**：出错时 `COUNT(*)` 返回错误数字但不报错
-
-## 需要特别注意的四点「不诚实就会出问题」
-
-设计文档刻意不回避以下限制，评审时请确认这些取舍是可接受的：
-
-- **冷热查询延迟差约 60 倍**（热 p50 14ms / 冷 p50 874ms，参照 turbopuffer 实测）。与 MySQL 用户的心理预期差 **2–3 个数量级**，且无法通过优化消除。§14.1 的 SLO 因此必须分「缓存命中」与「未命中」两栏陈述。
-- **提交延迟 p50 约 50 ms**（`sync` 档），下界是一次对象存储 PUT 的 RTT；p99 受 S3 PUT 实测 p99（400–600 ms）约束。这是物理约束，不是实现问题。
-- **默认快照隔离不防写偏斜**，而 InnoDB 的 REPEATABLE READ 通过 next-key lock 在很大程度上避免了它。依赖 InnoDB 加锁语义的应用迁移后可能出现新异常（§7.4、§16.1 Q8）。
-- **自增主键不保证连续**（分段预取，与 `innodb_autoinc_lock_mode=2` 行为一致），依赖连续性的业务会受影响（§11.4）。
-
-> 一条贯穿性的教训：**「协议兼容」不等于「语义兼容」**。Bufstream 通过了 Jepsen 的存储正确性验证，但仍继承了 Kafka 的事务隔离缺陷。MySQL 用户对隔离级别、间隙锁、autocommit 的期望远强于 Kafka 用户——如实报告语义比扩展兼容面更重要。
-
-## 成本模型的表述边界
-
-成本优势**不是均匀的 10 倍**，而是分两部分（§13.2）：
-
-- 与**数据量**绑定的成本降低约 30–50 倍；
-- 与**计算**绑定的成本从「不可中断」变为「可中断、可套利」——这才是真正解决「续费涨价」问题的部分。
-
-文档中所有云厂商单价均为量级参考，实现前需按实时价目表复核。
-
-## 下一步
-
-设计文档 §17 定义了 M0–M5 六个里程碑，每个都有可演示的成果与可验证的验收标准。
-
-**当前状态：M0 已完成并通过验收，M1–M3 的核心部分也已落地**（LSM 引擎与崩溃恢复、
-MVCC 快照隔离、跨分片 2PC、四类索引与全文检索、分区裁剪、MySQL 协议、
-元数据服务 MS 等）。已实现与未实现的完整清单见
-[../PROJECT_GUIDE.md](../PROJECT_GUIDE.md) 的「版本状态」一节；使用侧的限制见
-[compatibility.md](compatibility.md)。
+Rows marked `—` are Chinese-only for now; English versions are being written. See the roadmap in [PROJECT_GUIDE.md](../PROJECT_GUIDE.md).
