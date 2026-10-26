@@ -449,6 +449,10 @@ class ObjectStoreConformanceTest {
             note = "endpoint=$endpoint bucket=$bucket region=$region style=${style ?: "s3"} " +
                 "pathStyle=${pathStyle ?: "auto"}",
             open = {
+                // ★ 桶可能在这个后端上**还没存在**（CI 的每个分片用自己的桶，本地换一个
+                // 桶名也是常事）。没有这一步，一个新桶会让整套用例全部变成「桶不存在」，
+                // 看上去像是后端不兼容。ensureBucket 是幂等的：已存在时只花一次 HEAD。
+                S3ObjectStore.ensureBucket(bucket, endpoint, region, ak, sk, pathStyle)
                 S3ObjectStore.create(
                     bucket = bucket,
                     endpoint = endpoint,
