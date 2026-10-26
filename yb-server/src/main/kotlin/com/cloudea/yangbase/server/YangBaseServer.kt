@@ -97,6 +97,14 @@ class YangBaseServer(
     val metricsBoundPort: Int get() = http?.boundPort ?: -1
 
     /**
+     * 此刻还活着的 MySQL 连接数。
+     *
+     * 对外暴露是为了**排障**：客户端挂住时，"服务端到底有没有收到这条连接"
+     * 决定责任方在客户端还是服务端——这个问题在 CI 上被查了三轮。
+     */
+    val liveMysqlConnections: Int get() = mysql?.liveConnectionCount ?: 0
+
+    /**
      * 按 [ServerConfig.coordMode] 装配协调实现（§4.7 的两种模式 + 单进程模式）。
      *
      * 这个过程里唯一需要小心的是**顺序**：进程内 MS 必须先起来并选出领导者，

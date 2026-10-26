@@ -110,6 +110,9 @@ class MysqlServer(
                     Thread.ofVirtual().name("yb-conn-$id").start {
                         val conn = MysqlConnection(id, socket, engine, executor, config, observer)
                         liveConnections[id] = conn
+                        if (System.getProperty("yb.mysql.trace") != null) {
+                            System.err.println("[yb-mysql][trace] accepted #$id from ${runCatching { socket.remoteSocketAddress }.getOrNull()}")
+                        }
                         try {
                             conn.run()
                         } catch (t: Throwable) {
@@ -189,14 +192,28 @@ class MysqlConnection(
         var pos: Int = 0,
     )
 
+    /**
+     * 协议级 trace（`-Dyb.mysql.trace=1`）。
+     *
+     * 存在的理由很具体：`mysql` 客户端在 CI 上灌 dump 时挂住，客户端侧输出为 0
+     * （stdio 缓冲在进程被 kill 时全丢），于是**只能从服务端这一侧看它走到了哪一步**。
+     * 正常运行时它是关的，开销为零。
+     */
+    private fun trace(msg: String) {
+        if (System.getProperty("yb.mysql.trace") != null) System.err.println("[yb-mysql][trace] #$id $msg")
+    }
+
     fun run() {
         try {
             // 协议本身是「每连接串行」的，而执行器是挂起的；
             // 用 runBlocking 把两者接起来最直接——每条连接已经独占一个虚拟线程，
             // 阻塞它没有代价。
             kotlinx.coroutines.runBlocking {
+                trace("opened, peer=${peerName()}")
                 sendHandshake()
+                trace("greeting sent (caps=0x%08x)".format(serverCapabilities()))
                 if (!readHandshakeResponse()) return@runBlocking
+                trace("handshake ok: user='$user' db=$database charset=${session.charset} caps=0x%08x".format(capabilities))
                 commandLoop()
             }
         } finally {
@@ -345,6 +362,7 @@ class MysqlConnection(
 
             val cmd = payload[0].toInt() and 0xFF
             val args = payload.copyOfRange(1, payload.size)
+            trace("cmd=0x%02x len=%d %s".format(cmd, payload.size, runCatching { session.charset.decode(args).take(120) }.getOrDefault("<binary>")))
             try {
                 when (cmd) {
                     Packets.COM_QUIT -> return
@@ -425,6 +443,20 @@ class MysqlConnection(
 
     private suspend fun handleQuery(sql: String) {
         val stmts = Parser.parseAll(sql)
+        // ★ **只有注释（或整个是空白）的 COM_QUERY 必须回一个 OK。**
+        //
+        // `Parser.parseAll` 对这种输入返回**空列表**（没有语句可解析），而下面的
+        // 循环一次都不执行、于是一个字节也不回。协议里"每条命令一条应答"，
+        // 客户端于是永远等在那里——`mysql` 客户端导入 mysqldump 产物时就这样挂死，
+        // 因为 dump 的第一行是 `-- MySQL dump 10.13 …` 这类注释，
+        // 而 MySQL 8.4 的客户端会把注释放进 COM_QUERY 发出来（8.0 客户端先自己剥掉，
+        // 所以在本地永远复现不了，只在 CI 上炸）。
+        //
+        // 真实 MySQL 对空查询与纯注释查询都返回 OK（0 affected rows）。
+        if (stmts.isEmpty()) {
+            sendOk(0, 0)
+            return
+        }
         // ★ 多语句只有在客户端**协商过** `CLIENT_MULTI_STATEMENTS` 时才执行。
         // 无条件执行是危险的：`CLIENT_MULTI_STATEMENTS` 本来是一个让客户端
         // 明确声明「我知道这条 SQL 里可能有多个语句」的开关，SQL 注入防护
