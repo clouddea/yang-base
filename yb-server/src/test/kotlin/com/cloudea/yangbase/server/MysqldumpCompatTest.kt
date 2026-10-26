@@ -444,7 +444,7 @@ class MysqldumpCompatTest {
                             appendLine("进程是否存活：${restore.isAlive}")
                             appendLine("dump 文件：${dump.absolutePath}（${dump.length()} 字节）")
                             appendLine("server2 握手探针：通过（server version = $greeting）→ 服务端能服务，问题在客户端侧")
-                            appendLine("server2 活跃连接数：${server2.liveConnectionCount}")
+                            appendLine("server2 活跃连接数：${server2.liveMysqlConnections}")
                             appendLine()
                             appendLine("──── 服务端协议 trace（最后 6000 字符）────")
                             appendLine(runCatching { serverTrace.readText() }.getOrDefault("").takeLast(6_000))
