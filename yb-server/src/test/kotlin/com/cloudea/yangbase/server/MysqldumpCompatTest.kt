@@ -1,10 +1,14 @@
 package com.cloudea.yangbase.server
 
+import java.io.DataInputStream
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.file.Files
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.Statement
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -29,6 +33,64 @@ import kotlin.test.fail
  * 所以这里逐条盯住"工具要求什么"，而不是"我们实现了什么"。
  */
 class MysqldumpCompatTest {
+
+    /**
+     * 用原始 socket 做一次「服务器会不会主动打招呼」的探针。
+     *
+     * 「端口在监听」与「能服务」是两件事：`ServerSocket.bind` 成功之后、
+     * accept 循环真正跑起来之前，内核照样会替你把连接排进 backlog。
+     * 客户端连上去、然后**等一个永远不来的问候包**——这正是 CI 上
+     * 「0 输出、120s 不退出」的样子，而本地因为机器快，窗口太窄从不复现。
+     *
+     * 把这条探针放在启动 `mysql` 客户端之前，是为了在客户端挂住的那一刻
+     * **能分清责任方**：探针过了 → 服务端是好的，问题在客户端侧；
+     * 探针超时 → 就是服务端没准备好，这件事与测试无关，是产品缺陷。
+     */
+    private fun probeGreeting(port: Int, timeoutMs: Int = 5_000): String {
+        Socket().use { s ->
+            s.soTimeout = timeoutMs
+            s.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
+            val ins = DataInputStream(s.getInputStream())
+            val lenBytes = ByteArray(3).also { ins.readFully(it) }
+            val len = (lenBytes[0].toInt() and 0xFF) or
+                ((lenBytes[1].toInt() and 0xFF) shl 8) or
+                ((lenBytes[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte() // sequence id，首包恒为 0
+            val payload = ByteArray(len).also { ins.readFully(it) }
+            check(payload.isNotEmpty() && payload[0].toInt() == 10) {
+                "首包不是 Protocol::Handshake（期望 0x0a，实得 " +
+                    (payload.firstOrNull()?.let { "0x%02x".format(it) } ?: "空包") + "）"
+            }
+            val nul = payload.indexOfFirst { it == 0.toByte() }
+            val version = if (nul > 1) String(payload, 1, nul - 1, Charsets.US_ASCII) else ""
+            check(version.isNotEmpty()) { "问候包里的 server version 是空的" }
+            return version
+        }
+    }
+
+    /**
+     * 超时那一刻把 JVM 里的**虚拟线程**也 dump 出来。
+     *
+     * 连接处理走的是虚拟线程（`Thread.getAllStackTraces()` 看不见它们），
+     * 而 yb-mysql 的每条连接正好是一个虚拟线程。没有这份转储，
+     * 「客户端在等服务器」与「服务器卡在自己的某一行」只能靠猜。
+     */
+    private fun threadDump(): String = runCatching {
+        val jcmd = File(System.getProperty("java.home"), "bin/jcmd")
+        if (!jcmd.canExecute()) return@runCatching "<找不到 jcmd，跳过线程转储>"
+        val out = File.createTempFile("yangbase-tdump", ".txt")
+        val p = ProcessBuilder(
+            jcmd.absolutePath,
+            ProcessHandle.current().pid().toString(),
+            "Thread.dump_to_file",
+            "-format=text",
+            out.absolutePath,
+        ).redirectErrorStream(true).start()
+        p.waitFor(20, TimeUnit.SECONDS)
+        val text = runCatching { out.readText() }.getOrDefault("<读不到转储>")
+        out.delete()
+        text
+    }.getOrElse { "<线程转储失败：${it::class.simpleName}: ${it.message}>" }
 
     private lateinit var dataDir: java.nio.file.Path
     private lateinit var server: YangBaseServer
@@ -283,6 +345,9 @@ class MysqldumpCompatTest {
                 store = com.cloudea.yangbase.objectstore.LocalFileObjectStore(dir2), port = 0,
             )
             server2.start()
+            // 「先证明服务端能服务，再让客户端上」：探针失败时立刻断在这里，
+            // 报错指向服务端；探针通过而客户端仍挂 → 责任方是客户端侧。
+            val greeting = probeGreeting(server2.boundPort)
             val restoreOut = File.createTempFile("yangbase-restore", ".log")
             try {
                 val restore = ProcessBuilder(
@@ -295,6 +360,9 @@ class MysqldumpCompatTest {
                     "--connect-timeout=10",
                     // 强制 TCP：不依赖 socket 路径探测，`-h 127.0.0.1` 的行为才确定。
                     "--protocol=TCP",
+                    // 逐条打印正在执行的语句。挂住时这是**唯一**能说明
+                    // 「它走过了握手、停在第六条 SQL」的证据。
+                    "--verbose",
                 )
                     // ⚠️ 输出必须落到**文件**，不能用管道 + readBytes()：
                     // readBytes() 会阻塞到子进程关掉 stdout，且**没有任何超时**。
@@ -317,8 +385,12 @@ class MysqldumpCompatTest {
                             appendLine("恢复超时（120s）：mysql 客户端没有退出，已 destroyForcibly()")
                             appendLine("进程是否存活：${restore.isAlive}")
                             appendLine("dump 文件：${dump.absolutePath}（${dump.length()} 字节）")
+                            appendLine("server2 握手探针：通过（server version = $greeting）→ 服务端能服务，问题在客户端侧")
                             appendLine("客户端输出（${partial.length} 字符，取末尾 4000）：")
-                            append(if (partial.isEmpty()) "<空：客户端一个字都没输出>" else partial.takeLast(4_000))
+                            appendLine(if (partial.isEmpty()) "<空：客户端一个字都没输出>" else partial.takeLast(4_000))
+                            appendLine()
+                            appendLine("──── 服务端线程转储（含虚拟线程，取末尾 12000 字符）────")
+                            append(threadDump().takeLast(12_000))
                         },
                     )
                 }
