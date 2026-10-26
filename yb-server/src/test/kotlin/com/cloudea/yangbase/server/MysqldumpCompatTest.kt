@@ -247,6 +247,11 @@ class MysqldumpCompatTest {
             .firstOrNull { it.canExecute() }
         org.junit.jupiter.api.Assumptions.assumeTrue(tool != null, "本机没有 mysqldump，跳过往返用例")
 
+        // 客户端也要有：mysqldump 在而 mysql 不在时，恢复那一段会直接抛 IOException
+        val mysqlClient = listOf(File("/usr/bin/mysql"), File("/usr/local/bin/mysql"), File("/usr/bin/mariadb"))
+            .firstOrNull { it.canExecute() }
+        org.junit.jupiter.api.Assumptions.assumeTrue(mysqlClient != null, "本机没有 mysql 客户端，跳过往返用例")
+
         connect().use { c ->
             c.setup()
             c.exec("DROP VIEW IF EXISTS vpaid")
@@ -277,12 +282,21 @@ class MysqldumpCompatTest {
                 store = com.cloudea.yangbase.objectstore.LocalFileObjectStore(dir2), port = 0,
             )
             server2.start()
+            val restoreOut = File.createTempFile("yangbase-restore", ".log")
             try {
                 val restore = ProcessBuilder(
-                    "mysql", "-h", "127.0.0.1", "-P", "${server2.boundPort}", "-u", "root",
-                ).redirectInput(dump).redirectErrorStream(true).start()
-                val out = restore.inputStream.readBytes().decodeToString()
+                    mysqlClient!!.absolutePath, "-h", "127.0.0.1", "-P", "${server2.boundPort}", "-u", "root",
+                )
+                    // ⚠️ 输出必须落到**文件**，不能用管道 + readBytes()：
+                    // readBytes() 会阻塞到子进程关掉 stdout，且**没有任何超时**。
+                    // 一旦 mysql 客户端卡在等服务器响应，测试就永远不返回——
+                    // 2026-10-26 在 CI 上就这么挂了 45 分钟直到 job 超时（本地有构建缓存，没跑到）。
+                    .redirectInput(dump)
+                    .redirectOutput(restoreOut)
+                    .redirectErrorStream(true)
+                    .start()
                 assertTrue(restore.waitFor(120, java.util.concurrent.TimeUnit.SECONDS), "恢复超时")
+                val out = restoreOut.readText()
                 assertEquals(0, restore.exitValue(), "恢复失败：$out")
 
                 DriverManager.getConnection(
@@ -312,6 +326,7 @@ class MysqldumpCompatTest {
                 runCatching { server2.stop() }
                 runCatching { dir2.toFile().deleteRecursively() }
                 runCatching { dump.delete() }
+                runCatching { restoreOut.delete() }
             }
         }
     }
