@@ -18,6 +18,7 @@ All documentation is maintained in two languages:
 - **Just want to run it?** → [Getting Started](en/getting-started.md)
 - **Want to know how it works?** → [Architecture Overview](en/architecture.md)
 - **Migrating an existing MySQL app?** → [Compatibility and Limitations](en/compatibility.md)
+- **Choosing or verifying an object store?** → [Object Storage Backends](en/backends.md)
 - **Want to contribute?** → [CONTRIBUTING.md](../CONTRIBUTING.md) and [Development process](zh/development-process.md) (Chinese)
 
 ## Documentation status
@@ -27,6 +28,7 @@ All documentation is maintained in two languages:
 | Getting started | ✅ | ✅ [user-guide.md](zh/user-guide.md) (much more detailed) |
 | Architecture overview | ✅ | ✅ [yangbase-design.md](zh/yangbase-design.md) (full design) |
 | Compatibility & limits | ✅ | ✅ [compatibility.md](zh/compatibility.md) |
+| Object storage backends | ✅ [backends.md](en/backends.md) | ✅ [backends.md](zh/backends.md) |
 | Index benchmarks | — | ✅ [index-bench.md](zh/index-bench.md) |
 | Development process | — | ✅ [development-process.md](zh/development-process.md) |
 | Code review regression list | — | ✅ [code-review-2026-09.md](zh/code-review-2026-09.md) |

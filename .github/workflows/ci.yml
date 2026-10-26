@@ -34,6 +34,28 @@ jobs:
       - name: Build, test, verify coverage
         run: ./gradlew build --no-daemon --stacktrace
 
+      # 后端一致性矩阵：**兼容矩阵不是手写的文档**，而是这次 CI 的真实结果。
+      # 矩阵由 ObjectStoreConformanceTest 产出（行=后端，列=用例，
+      # ⊘=后端声明不支持该能力所以跳过，❌=声明支持却没做到）。
+      - name: Publish backend conformance matrix
+        if: always()
+        run: |
+          f=yb-objectstore/build/reports/conformance/matrix.md
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "conformance matrix 未生成（多半是测试步骤在它之前就失败了）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload conformance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-matrix
+          path: yb-objectstore/build/reports/conformance/matrix.md
+          retention-days: 30
+          if-no-files-found: ignore
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4

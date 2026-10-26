@@ -7,6 +7,7 @@
 | [getting-started.md](getting-started.md) | Build it, run it against MinIO or local files, execute your first SQL |
 | [architecture.md](architecture.md) | How the storage layout, write path, read path, transactions and metadata service fit together |
 | [compatibility.md](compatibility.md) | What MySQL features are supported, what is not, and the traps in between — **read this before migrating** |
+| [backends.md](backends.md) | Supported object stores, the backend contract, and how to verify a new one with the conformance suite |
 
 The complete design document (3000+ lines, §0–§17 plus four appendices) is maintained in Chinese at [docs/zh/yangbase-design.md](../zh/yangbase-design.md). The English architecture overview summarizes it and cites the relevant sections; where the two disagree, the Chinese document is authoritative.
 
