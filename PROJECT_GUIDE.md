@@ -11,7 +11,7 @@
 
 **定位**：面向**低频、读多写少、需要事务与 SQL** 的应用。不试图在性能上击败本地盘数据库，而是消解「没有客户的时候仍要为数据库付一笔固定费用」这个问题。
 
-> 📖 **动手前先读 [docs/yangbase-design.md](docs/yangbase-design.md)。** 它是本项目的权威设计，3007 行 / §0–§17 + 4 附录。
+> 📖 **动手前先读 [docs/zh/yangbase-design.md](docs/zh/yangbase-design.md)。** 它是本项目的权威设计，3007 行 / §0–§17 + 4 附录。
 > 评审指引与「实现过程中仍需持续守护的 9 条」见 [docs/README.md](docs/README.md)。
 >
 > ✅ **所有架构决策已于 2026-09-23 确认**，见设计文档 §16.1（含九项决策记录与被否决的方案）。
@@ -261,7 +261,7 @@ GC 覆盖 MS 日志与已删表遗留 · `ls`/`cost` 只花 LIST 的请求、不
 > 反过来 MS 的**租约**（11ms / 6 请求）比 `objectstore`（49ms / 4 请求）快，但比
 > `single`（5µs / 0 请求）慢三个数量级——因为租约要进共识日志 = 真实 PUT。
 > 所以**选型看负载形状**：行锁密集选 `ms`，几乎不用 `FOR UPDATE` 又想要零常驻成本选 `objectstore`。
-> 数字与解读同步维护在 [docs/compatibility.md](docs/compatibility.md) §4.4.2（**以那一份为准**）。
+> 数字与解读同步维护在 [docs/zh/compatibility.md](docs/zh/compatibility.md) §4.4.2（**以那一份为准**）。
 >
 > ⚠️ **MS 的选举超时默认 500ms–1s，比内存共识的经验值大一个量级**：它的日志落在对象
 > 存储上，一次追加就是一次 PUT。超时只有 150ms 时，一次慢复制就足以让跟随者发起选举，
@@ -281,10 +281,10 @@ GC 覆盖 MS 日志与已删表遗留 · `ls`/`cost` 只花 LIST 的请求、不
 （租约/行锁依赖 ETag CAS），请用 `single` 或 `ms`。详见设计文档 §3.3。
 
 > 🔍 **一轮完整的代码审查（59 条发现项）与它的回归清单在
-> [docs/code-review-2026-09.md](docs/code-review-2026-09.md)**：每条都写了
+> [docs/zh/code-review-2026-09.md](docs/zh/code-review-2026-09.md)**：每条都写了
 > 「当初为什么会发生」与「哪条测试盯着它」。改到相关代码时，请连同那条测试一起看。
 
-> 📄 **面向使用者的兼容性与限制清单在 [docs/compatibility.md](docs/compatibility.md)**
+> 📄 **面向使用者的兼容性与限制清单在 [docs/zh/compatibility.md](docs/zh/compatibility.md)**
 > （§11.3 要求「必须写进用户文档」的那一份）。改协议、改类型、改语义时同步更新它：
 > 「协议兼容」不等于「语义兼容」，而使用者只会读到那份文档。
 
@@ -300,7 +300,7 @@ GC 覆盖 MS 日志与已删表遗留 · `ls`/`cost` 只花 LIST 的请求、不
 
 用户明确要求真实后端验收时，可运行独立的 `:yb-bench:benchIndexes`，
 使用随机前缀隔离和按前缀清理，禁止清空整个桶；密钥仅通过运行环境传入。
-完整覆盖矩阵、IO 门禁、MinIO/OSS 入口见 [docs/index-bench.md](docs/index-bench.md)。
+完整覆盖矩阵、IO 门禁、MinIO/OSS 入口见 [docs/zh/index-bench.md](docs/zh/index-bench.md)。
 
 ---
 
@@ -371,6 +371,6 @@ M1–M3 的核心部分（见上方「版本状态」）。
 > **存储分层（§13.3）已决定短期不做**（2026-09-24）：它省的是存储单价，而本系统的
 > 成本主线是「计算与存储解耦」，那条线已经实现了；真正该做的冷却是 `DROP PARTITION`
 > （已实现，成本 ≈ 0）。理由与"如果以后要做该守住什么边界"见
-> [docs/compatibility.md](docs/compatibility.md)。
+> [docs/zh/compatibility.md](docs/zh/compatibility.md)。
 
 完整里程碑见设计文档 §17。

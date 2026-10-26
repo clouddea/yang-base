@@ -7,5 +7,5 @@ contact_links:
     url: https://github.com/clouddea/yang-base/security/advisories/new
     about: 请不要公开提交安全漏洞。
   - name: 设计文档
-    url: https://github.com/clouddea/yang-base/blob/main/docs/yangbase-design.md
+    url: https://github.com/clouddea/yang-base/blob/main/docs/zh/yangbase-design.md
     about: 3000 行完整设计，很多「为什么这么设计」的问题里面已经有答案。

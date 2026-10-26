@@ -99,7 +99,7 @@ git checkout dev/<下一个版本> && git merge main && git push
 - **CI 必须全绿**（`build` + `integrationTest` 两个 job），不允许“先合后修”
 - 描述里写清：做了什么、为什么、怎么验证的（贴输出，不要只写“测试通过”）
 - 改了读路径 → 必须有**对象存储请求数断言**
-- 改了 SQL 语义 → 必须同步 `docs/compatibility.md`
+- 改了 SQL 语义 → 必须同步 `docs/zh/compatibility.md`
 - 新代码注释写英文（2026-11 起）
 - 不把功能改动和格式化 / 重命名混在同一个提交里
 

@@ -11,7 +11,7 @@
 - [ ] `./gradlew build`（编译 + 单元测试 + kover ≥50%）
 - [ ] `./gradlew integrationTest`（**不包含在 build 里，必须单独跑**）
 - [ ] 如果改了读路径：补了**对象存储请求数断言**
-- [ ] 如果改了 SQL 语义：在 `docs/compatibility.md` 里同步了行为说明
+- [ ] 如果改了 SQL 语义：在 `docs/zh/compatibility.md` 里同步了行为说明
 
 <!-- 贴关键输出，不要只写「测试通过」 -->
 
