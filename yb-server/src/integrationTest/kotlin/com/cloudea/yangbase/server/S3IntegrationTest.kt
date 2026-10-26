@@ -2,6 +2,8 @@ package com.cloudea.yangbase.server
 
 import com.cloudea.yangbase.objectstore.CountingObjectStore
 import com.cloudea.yangbase.objectstore.EmbeddedS3Server
+import com.cloudea.yangbase.objectstore.ObjectStore
+import com.cloudea.yangbase.objectstore.RetryingObjectStore
 import com.cloudea.yangbase.objectstore.S3ObjectStore
 import kotlinx.coroutines.runBlocking
 import java.sql.Connection
@@ -82,7 +84,21 @@ class S3IntegrationTest {
                 pathStyle = externalPathStyle,
                 caps = externalCaps,
             )
-            wipe(store)
+            // ★ 真实后端必须**套上 L1 重试层**再动它，这一层不是可选项。
+            //
+            // 2026-10-26 的 CI 就是这么红的：GitHub runner 在境外，到杭州 OSS 的
+            // TCP connect 偶尔会超时（`SocketTimeoutException: Connect timed out`，
+            // `S3ObjectStore.list` → `LIST  失败`，prefix 为空），而 `wipe()` 是
+            // **每个用例的第一步**，它拿的是裸 store——一次 connect 抖动直接让
+            // `Range 读取返回正确字节` 这类用例失败，看上去像 Range 读有 bug。
+            //
+            // 生产里 `YangBaseServer` 永远是 `RetryingObjectStore(InstrumentedObjectStore(raw))`
+            // （见 YangBaseServer.start()），conformance 套件也是这么套的；
+            // 集成测试越过这一层，等于在测一个**线上不存在的组合**。
+            //
+            // 时限比 L1 的 5s 默认值宽：一次 connect 超时就可能吃掉好几秒，
+            // 5s 的总时限会让「重试」在被调用之前就已经过期。
+            wipe(withRetry(store))
             store
         } else {
             val emb = EmbeddedS3Server("yangbase-it")
@@ -98,6 +114,10 @@ class S3IntegrationTest {
         }
 
         // 在真实 S3 客户端外面套一层计数器：这样能直接断言「这个查询打了几次对象存储」
+        // 计数器保持在**最内层**（与生产的 InstrumentedObjectStore 同位置）：
+        // `yb_objectstore_requests_total` 记的是真实发出的请求数，一次重试就是一次真实请求。
+        // 重试层由 `YangBaseServer.forTesting` 自己加在它外面，不要在这里再套一层——
+        // 两层重试会把尝试次数变成乘积（4×4）。
         counting = CountingObjectStore(raw)
 
         server = YangBaseServer.forTesting(
@@ -123,16 +143,30 @@ class S3IntegrationTest {
         s3?.let { runCatching { it.stop() } }
     }
 
+    /**
+     * 给真实后端套上 L1 重试层（生产与 conformance 套件的组合）。
+     *
+     * 内嵌服务器是同一台机器上的 loopback，没有「连接被公网掐断」这一类故障，
+     * 所以只在真实后端上套——套上去反倒让内嵌用例的请求计数变得难读。
+     */
+    private fun withRetry(raw: ObjectStore): ObjectStore = if (externalEndpoint != null) {
+        RetryingObjectStore(raw, maxAttempts = 4, deadlineMillis = 120_000)
+    } else {
+        raw
+    }
+
     /** 直接测对象存储语义时用的 store —— 与主测试走同一后端。 */
-    private fun externalOrEmbeddedStore(): S3ObjectStore = if (externalEndpoint != null) {
-        S3ObjectStore.create(
-            bucket = cfg("YB_S3_BUCKET") ?: "yangbase",
-            endpoint = externalEndpoint,
-            region = cfg("YB_S3_REGION") ?: "us-east-1",
-            accessKey = cfg("YB_S3_ACCESS_KEY"),
-            secretKey = cfg("YB_S3_SECRET_KEY"),
+    private fun externalOrEmbeddedStore(): ObjectStore = if (externalEndpoint != null) {
+        withRetry(
+            S3ObjectStore.create(
+                bucket = cfg("YB_S3_BUCKET") ?: "yangbase",
+                endpoint = externalEndpoint,
+                region = cfg("YB_S3_REGION") ?: "us-east-1",
+                accessKey = cfg("YB_S3_ACCESS_KEY"),
+                secretKey = cfg("YB_S3_SECRET_KEY"),
                 pathStyle = externalPathStyle,
                 caps = externalCaps,
+            ),
         )
     } else {
         S3ObjectStore.create(
