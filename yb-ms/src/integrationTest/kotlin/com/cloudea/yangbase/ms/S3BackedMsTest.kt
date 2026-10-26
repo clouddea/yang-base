@@ -91,6 +91,11 @@ class S3BackedMsTest {
             // 真实后端上一次追加就是一次真实 PUT（几十毫秒）：超时太小会让集群
             // 在负载下反复换领导者（§4.4 的实测教训），所以这里跟着放大
             electionTimeoutMillis = if (externalEndpoint != null) 1_500L..3_000L else 300L..600L,
+            // 提交预算显式放大到 5s（默认推导值在这里只有 300ms）：CI 的 2 核 runner 上
+            // S3 落盘路径（HTTP + 本地内嵌 S3）会被 CPU 争抢拉到几百毫秒，
+            // 300ms 内凑不齐多数派确认，表现为「提交超时（300ms）」。
+            // 这里只放宽客户端等待，不动选举超时——重选行为仍然是这个用例要测的东西。
+            commitTimeoutMillis = 5_000,
         )
         try {
             cluster.awaitLeader(if (externalEndpoint != null) 60_000 else 10_000)

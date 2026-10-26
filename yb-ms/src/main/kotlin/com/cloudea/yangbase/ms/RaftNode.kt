@@ -81,7 +81,21 @@ class RaftNode(
      * 而该有的只有 6 次）。
      */
     private val replicateTimeoutMillis: Long = (electionTimeoutMillis.first / 2).coerceAtLeast(50),
+    /**
+     * 客户端等"这条日志被多数派确认"的上限（毫秒）。超时回 [MetaResponse.Error]（提交超时）。
+     *
+     * 默认由 [replicateTimeoutMillis] 推导（两轮复制的量），**生产行为不变**。
+     * 留成可覆盖的参数，是因为这个值只对"一轮复制能在多久内完成"有意义，
+     * 而这件事取决于**后端存储的延迟**，不是共识算法：内存 store 是纳秒级，
+     * 内嵌 S3 走 HTTP + 真实 PUT 是毫秒级，CI 上 2 核 runner 跑集成测试时还会更慢。
+     * 集成测试因此需要比默认值宽松得多的预算，而**不应该**为此去放大选举超时
+     * （那会同时改变集群的重选行为，测试就不再测它本来要测的东西）。
+     */
+    commitTimeoutMillisOverride: Long? = null,
 ) : MetaRpcHandler {
+
+    /** 提交等待的实际预算：[commitTimeoutMillisOverride] 优先，否则由复制超时推导。 */
+    private val commitTimeoutMillis: Long = commitTimeoutMillisOverride ?: (replicateTimeoutMillis * 2)
 
     enum class Role { FOLLOWER, CANDIDATE, LEADER }
 
@@ -673,9 +687,9 @@ class RaftNode(
         // （自己是唯一多数派）靠的就是这里，而不是等下一轮心跳
         mutex.withLock { advanceCommit(entry.term) }
         replicate(entry.term)
-        val result = withTimeoutOrNull(replicateTimeoutMillis * 2) { waiter.await() }
+        val result = withTimeoutOrNull(commitTimeoutMillis) { waiter.await() }
         pending.remove(entry.index)
-        return result ?: MetaResponse.Error(entry.term, "提交超时（${replicateTimeoutMillis * 2}ms）：多数派未能确认日志 ${entry.index}")
+        return result ?: MetaResponse.Error(entry.term, "提交超时（${commitTimeoutMillis}ms）：多数派未能确认日志 ${entry.index}")
     }
 
     /** 等到"本任期的第一条日志已提交"为止。见 [leaderReadyTerm] 的说明。 */
