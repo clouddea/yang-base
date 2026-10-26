@@ -1,0 +1,137 @@
+name: OSS conformance (real Aliyun OSS)
+
+# 为什么单独一个 workflow，而不是塞进 ci.yml：
+#
+#  1. **凭据**。真实 OSS 需要一个 AccessKey。PR（尤其是 fork 的 PR）永远不该拿到它，
+#     而 ci.yml 是跑在 `pull_request` 上的。分开放，边界一眼能看出来。
+#  2. **成本与噪音**。每次 push 都打真实云会产生真实账单与网络抖动；
+#     真实后端的一致性只需要**每天一次**，外加手动触发。
+#  3. **信号**。这个 job 红了，说明"跟真实云对不上了"，与代码是否编译通过是两件事。
+#
+# 触发方式：每晚一次 + 手动。**不在 pull_request 上跑。**
+on:
+  workflow_dispatch:
+    inputs:
+      skip_integration:
+        description: '只跑 conformance，跳过集成测试（快速验证凭据）'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 18 * * *' # 18:00 UTC = 02:00 CST
+
+concurrency:
+  group: oss-conformance
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. 后端一致性：同一套用例打在真实 OSS 上 ────────────────────
+  conformance:
+    name: conformance · aliyun OSS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request'
+    env:
+      YANGBASE_CONFORMANCE_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+      YANGBASE_CONFORMANCE_BUCKET: ${{ secrets.OSS_BUCKET }}
+      YANGBASE_CONFORMANCE_REGION: ${{ secrets.OSS_REGION }}
+      YANGBASE_CONFORMANCE_STYLE: oss
+      YANGBASE_CONFORMANCE_PATH_STYLE: 'false'
+      YANGBASE_CONFORMANCE_NAME: aliyun-oss-ci
+      YANGBASE_CONFORMANCE_ACCESS_KEY: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      YANGBASE_CONFORMANCE_SECRET_KEY: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      # 桶名守卫。集成测试的 IntegrationStore 在启动时会**清空整个桶**，
+      # 而这里的凭据也可能是有人手工配的、指向一个有数据的桶。
+      # 名字里必须带 `-ci`，是一个粗糙但有效的刹车。
+      - name: Guard · bucket must be a dedicated CI bucket
+        env:
+          BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          case "$BUCKET" in
+            *-ci|*-ci-*|*ci-test*) echo "bucket=$BUCKET 看起来是专用 CI 桶，继续" ;;
+            *) echo "::error::OSS_BUCKET=$BUCKET 不像专用 CI 桶（名字里要有 -ci）。集成测试会清空整个桶，拒绝继续。"; exit 1 ;;
+          esac
+
+      - name: Run conformance suite against real OSS
+        run: ./gradlew :yb-objectstore:test --tests '*ObjectStoreConformanceTest*' --no-daemon --stacktrace
+
+      - name: Publish conformance matrix
+        if: always()
+        run: |
+          f=yb-objectstore/build/reports/conformance/matrix.md
+          if [ -f "$f" ]; then cat "$f" >> "$GITHUB_STEP_SUMMARY"; else echo "矩阵未生成（测试在它之前就失败了）" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload conformance matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-conformance-matrix
+          path: yb-objectstore/build/reports/conformance/matrix.md
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ── 2. 引擎层集成测试：真的读写 OSS ────────────────────────────
+  # 这一步才会压到 LSM/事务/索引层，而不只是 SPI。
+  # 已知：2026-09 在 OSS 上手工跑过 S3IntegrationTest 8/8、IoBudgetIntegrationTest 15/15、
+  # MultiCnCoordinationTest 4/4。这里把它变成每天自动跑。
+  integration:
+    name: integration · aliyun OSS
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' && !inputs.skip_integration
+    needs: conformance
+    env:
+      YB_S3_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+      YB_S3_BUCKET: ${{ secrets.OSS_BUCKET }}
+      YB_S3_REGION: ${{ secrets.OSS_REGION }}
+      YB_S3_PATH_STYLE: 'false'
+      YB_S3_OSS: 'true'
+      YB_S3_ACCESS_KEY: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      YB_S3_SECRET_KEY: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Guard · bucket must be a dedicated CI bucket
+        env:
+          BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          case "$BUCKET" in
+            *-ci|*-ci-*|*ci-test*) echo "bucket=$BUCKET ok" ;;
+            *) echo "::error::OSS_BUCKET=$BUCKET 不像专用 CI 桶（名字里要有 -ci）。集成测试会清空整个桶，拒绝继续。"; exit 1 ;;
+          esac
+
+      # 只跑 yb-server 的集成测试：yb-ms 的 S3BackedMsTest 有已知 flaky（issue #5），
+      # 在它修好之前不让它挡住这条每天一次的信号。
+      - name: Run engine integration tests against real OSS
+        run: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace
+
+      - name: Upload integration reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-integration-reports
+          path: |
+            yb-server/build/reports/tests/integrationTest/**
+            yb-server/build/test-results/integrationTest/**
+          retention-days: 7
+          if-no-files-found: ignore
