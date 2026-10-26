@@ -11,6 +11,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /**
  * **`mysqldump` / `mysql` 这类标准 MySQL 工具的兼容面**。
@@ -295,7 +296,24 @@ class MysqldumpCompatTest {
                     .redirectOutput(restoreOut)
                     .redirectErrorStream(true)
                     .start()
-                assertTrue(restore.waitFor(120, java.util.concurrent.TimeUnit.SECONDS), "恢复超时")
+                // 超时那一刻，客户端的输出是**唯一**的线索：直接断言失败的话，报告里
+                // 只有一句「恢复超时」，看不出它是卡在等服务器响应、卡在某条 SQL 上，
+                // 还是根本没连上。所以先强制结束子进程（否则它会把 stdout 文件继续占着
+                // 写，读到的内容也不稳定），再把能拿到的东西全部塞进断言消息。
+                if (!restore.waitFor(120, java.util.concurrent.TimeUnit.SECONDS)) {
+                    runCatching { restore.destroyForcibly() }
+                    runCatching { restore.waitFor(10, java.util.concurrent.TimeUnit.SECONDS) }
+                    val partial = runCatching { restoreOut.readText() }.getOrDefault("<读取失败>")
+                    fail(
+                        buildString {
+                            appendLine("恢复超时（120s）：mysql 客户端没有退出，已 destroyForcibly()")
+                            appendLine("进程是否存活：${restore.isAlive}")
+                            appendLine("dump 文件：${dump.absolutePath}（${dump.length()} 字节）")
+                            appendLine("客户端输出（${partial.length} 字符，取末尾 4000）：")
+                            append(if (partial.isEmpty()) "<空：客户端一个字都没输出>" else partial.takeLast(4_000))
+                        },
+                    )
+                }
                 val out = restoreOut.readText()
                 assertEquals(0, restore.exitValue(), "恢复失败：$out")
 
