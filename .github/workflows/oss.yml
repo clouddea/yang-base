@@ -32,7 +32,12 @@ jobs:
     if: github.event_name != 'pull_request'
     env:
       YANGBASE_CONFORMANCE_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
-      YANGBASE_CONFORMANCE_BUCKET: ${{ secrets.OSS_BUCKET }}
+      # ★ 每个 job 一个**自己的桶**，不共用 `OSS_BUCKET` 本身。
+      # 2026-10-26 就是这么红了一次：本地同时在对 `yangbase-ci` 跑集成测试（每个用例
+      # 启动都会清空整桶），把 CI 这边 conformance 刚写进去的两个对象删了，
+      # 报错是 `ObjectNotFoundException: 对象不存在: conf/<session>/r`——
+      # 看起来像 conformance 的缺陷，其实是两个 runner 在抢同一个桶。
+      YANGBASE_CONFORMANCE_BUCKET: ${{ secrets.OSS_BUCKET }}-conformance
       YANGBASE_CONFORMANCE_REGION: ${{ secrets.OSS_REGION }}
       YANGBASE_CONFORMANCE_STYLE: oss
       YANGBASE_CONFORMANCE_PATH_STYLE: 'false'
@@ -56,7 +61,7 @@ jobs:
       # 名字里必须带 `-ci`，是一个粗糙但有效的刹车。
       - name: Guard · bucket must be a dedicated CI bucket
         env:
-          BUCKET: ${{ secrets.OSS_BUCKET }}
+          BUCKET: ${{ secrets.OSS_BUCKET }}-conformance
         run: |
           case "$BUCKET" in
             *-ci|*-ci-*|*ci-test*) echo "bucket=$BUCKET 看起来是专用 CI 桶，继续" ;;
