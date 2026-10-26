@@ -48,6 +48,11 @@ class MetaServiceNode(
     // 在负载下反复重新选举（理由见 `RaftNode.electionTimeoutMillis`）
     electionTimeoutMillis: LongRange = 500L..1_000L,
     heartbeatMillis: Long = 50,
+    /**
+     * 客户端等"这条日志被多数派确认"的上限（毫秒）。`null` = 与 [RaftNode] 的默认推导一致
+     * （复制等待 × 2），**生产行为不变**。只有集成测试需要放大它（见 [RaftNode.commitTimeoutMillisOverride]）。
+     */
+    commitTimeoutMillis: Long? = null,
 ) : MetaRpcHandler {
 
     val raft = RaftNode(
@@ -59,6 +64,7 @@ class MetaServiceNode(
         scope = scope,
         electionTimeoutMillis = electionTimeoutMillis,
         heartbeatMillis = heartbeatMillis,
+        commitTimeoutMillisOverride = commitTimeoutMillis,
     )
 
     private var tcp: TcpMetaServer? = null
@@ -131,9 +137,11 @@ class InProcessMetaCluster(
             scope: CoroutineScope,
             nodePrefix: String = "ms",
             // 默认值与 `RaftNode` 一致：日志在对象存储上，超时取内存共识的量级会让集群
-    // 在负载下反复重新选举（理由见 `RaftNode.electionTimeoutMillis`）
-    electionTimeoutMillis: LongRange = 500L..1_000L,
+            // 在负载下反复重新选举（理由见 `RaftNode.electionTimeoutMillis`）
+            electionTimeoutMillis: LongRange = 500L..1_000L,
             heartbeatMillis: Long = 50,
+            /** 提交等待预算（毫秒）；`null` = 沿用 `RaftNode` 的默认推导。 */
+            commitTimeoutMillis: Long? = null,
         ): InProcessMetaCluster {
             val transport = InProcessMetaTransport()
             val addresses = (1..count).map { "$nodePrefix-$it" }
@@ -147,6 +155,7 @@ class InProcessMetaCluster(
                     transport = transport,
                     electionTimeoutMillis = electionTimeoutMillis,
                     heartbeatMillis = heartbeatMillis,
+                    commitTimeoutMillis = commitTimeoutMillis,
                 )
             }
             nodes.forEach { it.start() }
