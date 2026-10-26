@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用问题 / 讨论（Discussions）
+    url: https://github.com/clouddea/yang-base/discussions
+    about: 「怎么部署」「这条 SQL 为什么不支持」这类问题请走 Discussions，不要开 issue。
+  - name: 安全问题（私下报告）
+    url: https://github.com/clouddea/yang-base/security/advisories/new
+    about: 请不要公开提交安全漏洞。
+  - name: 设计文档
+    url: https://github.com/clouddea/yang-base/blob/main/docs/yangbase-design.md
+    about: 3000 行完整设计，很多「为什么这么设计」的问题里面已经有答案。
