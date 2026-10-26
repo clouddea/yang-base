@@ -83,17 +83,44 @@ jobs:
 
   # ── 2. 引擎层集成测试：真的读写 OSS ────────────────────────────
   # 这一步才会压到 LSM/事务/索引层，而不只是 SPI。
-  # 已知：2026-09 在 OSS 上手工跑过 S3IntegrationTest 8/8、IoBudgetIntegrationTest 15/15、
-  # MultiCnCoordinationTest 4/4。这里把它变成每天自动跑。
+  #
+  # ★ 为什么按用例类**分片**（而且是并行的分片）
+  #
+  # 2026-10-26 第一次真跑：单个 job 跑到 45 分钟被 GitHub 掐掉，而不是断言失败。
+  # 根因是**对象存储的往返**：GitHub runner 到杭州 OSS 单次请求 100–300ms，而每个
+  # 用例类在 setUp 里都要把桶清空（LIST + 逐个 DELETE，且 DELETE 还带一次 HEAD），
+  # 一趟下来 40 分钟就没了。分片不是为了好看，是因为"总时长"这件事会随时钟漂移，
+  # 而单个 job 的时限不会。
+  #
+  # 分片之间**必须用各自的桶**：每个用例类启动时都会清空整个桶，共用桶的后果不是
+  # "慢"，是**互相删掉对方正在读的数据**。桶由 `ensureBucket` 按需创建，名字里带
+  # `-ci-`（守卫要求）。空桶不产生存储费用。分片名出现在 job 名里，红了就知道是谁。
   integration:
-    name: integration · aliyun OSS
+    name: integration · aliyun OSS · ${{ matrix.group }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
     if: github.event_name != 'pull_request' && !inputs.skip_integration
     needs: conformance
+    strategy:
+      # 一个分片红了不该把其他分片的结论一起取消：它们测的是不同的东西
+      fail-fast: false
+      matrix:
+        include:
+          # 时间大头：15 个用例，且每个都要重建一份数据集
+          - group: io-budget
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*IoBudgetIntegrationTest*'
+          - group: sql
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*OptimizerIntegrationTest*' --tests '*HashPartitionIntegrationTest*' --tests '*ManualSqlRegressionIntegrationTest*'
+          - group: observability
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*ObservabilityIntegrationTest*' --tests '*MetricsNoIoIntegrationTest*' --tests '*SkipIndexIntegrationTest*'
+          # 多 CN 要起 3 个 MS 节点 + 2 个 CN，最吃"共识在高延迟后端上的收敛"
+          - group: multi-cn
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*MultiCnCoordinationTest*'
+          - group: objectstore
+            cmd: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace --tests '*S3IntegrationTest*'
     env:
       YB_S3_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
-      YB_S3_BUCKET: ${{ secrets.OSS_BUCKET }}
+      YB_S3_BUCKET: ${{ secrets.OSS_BUCKET }}-${{ matrix.group }}
       YB_S3_REGION: ${{ secrets.OSS_REGION }}
       YB_S3_PATH_STYLE: 'false'
       YB_S3_OSS: 'true'
@@ -113,23 +140,21 @@ jobs:
 
       - name: Guard · bucket must be a dedicated CI bucket
         env:
-          BUCKET: ${{ secrets.OSS_BUCKET }}
+          BUCKET: ${{ secrets.OSS_BUCKET }}-${{ matrix.group }}
         run: |
           case "$BUCKET" in
             *-ci|*-ci-*|*ci-test*) echo "bucket=$BUCKET ok" ;;
             *) echo "::error::OSS_BUCKET=$BUCKET 不像专用 CI 桶（名字里要有 -ci）。集成测试会清空整个桶，拒绝继续。"; exit 1 ;;
           esac
 
-      # 只跑 yb-server 的集成测试：yb-ms 的 S3BackedMsTest 有已知 flaky（issue #5），
-      # 在它修好之前不让它挡住这条每天一次的信号。
-      - name: Run engine integration tests against real OSS
-        run: ./gradlew :yb-server:integrationTest --no-daemon --stacktrace
+      - name: Run engine integration tests against real OSS (${{ matrix.group }})
+        run: ${{ matrix.cmd }}
 
       - name: Upload integration reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oss-integration-reports
+          name: oss-integration-${{ matrix.group }}
           path: |
             yb-server/build/reports/tests/integrationTest/**
             yb-server/build/test-results/integrationTest/**
