@@ -26,7 +26,40 @@ YangBase 把**全部持久状态**放在对象存储里，并把它当作唯一�
 
 ---
 
-## 2. 后端契约到底是什么
+## 2. 怎么配一个后端：`--s3-provider` 预设
+
+过去接一个后端要手工填四样：端点、区域、寻址风格、能力声明。其中两样**填错不报错**：用路径式打阿里云 OSS 会得到 `SecondLevelDomainForbidden`；用标准 S3 条件头打 OSS 会被直接拒绝（400），而不是被忽略。
+
+`--s3-provider` 把这四样收进一个预设：
+
+```bash
+# 阿里云 OSS：端点按 region 推导、三级域名寻址、
+# 原子创建走 x-oss-forbid-overwrite、没有 ETag CAS
+yb-server --s3-provider oss --s3-region cn-hangzhou \
+          --s3-bucket my-bucket --s3-access-key "$AK" --s3-secret-key "$SK"
+
+# MinIO / 自建网关：必须给端点，路径式寻址
+yb-server --s3-provider minio --s3-endpoint http://127.0.0.1:9000 \
+          --s3-bucket yangbase --s3-access-key "$AK" --s3-secret-key "$SK"
+```
+
+| provider | 端点 | 默认区域 | 寻址 | 能力声明 | 已实测 |
+|---|---|---|---|---|---|
+| `aws`（默认） | SDK 内置 | `us-east-1` | 自动 | 标准 S3 全能力 | ✅ |
+| `minio` | 必须显式给 | `us-east-1` | 路径式 | 标准 S3 全能力 | ✅ |
+| `oss` | `https://oss-{region}.aliyuncs.com` | `cn-hangzhou` | 三级域名 | **无 ETag CAS**、`FORBID_OVERWRITE` | ✅ 真实服务 |
+| `cos` | `https://cos.{region}.myqcloud.com` | `ap-guangzhou` | 三级域名 | 标准 S3（假设） | ❌ 未实测 |
+| `obs` | `https://obs.{region}.myhuaweicloud.com` | `cn-north-4` | 三级域名 | 标准 S3（假设） | ❌ 未实测 |
+| `r2` | 必须显式给（`https://<account>.r2.cloudflarestorage.com`） | `auto` | 路径式 | 标准 S3（假设） | ❌ 未实测 |
+| `b2` | `https://s3.{region}.backblazeb2.com` | `us-west-004` | 路径式 | 标准 S3（假设） | ❌ 未实测 |
+
+显式参数永远优先（`--s3-endpoint`、`--s3-region`、`--s3-path-style`）。`--s3-oss` 保留为 `--s3-provider oss` 的兼容别名。
+
+**预设里声明的能力是"上限"，不是承诺。** 启动时的能力探测会实测并按「声明 ∩ 实测」收敛——所以预设写得再乐观也会被纠正，纠正不了就拒绝启动。这也是 `cos`/`obs`/`r2`/`b2` 可以声明"标准 S3 全能力"却仍标成**未实测**的原因：声明的意思是"先按标准 S3 语义试试"，不是"我们验过了"。
+
+---
+
+## 3. 后端契约到底是什么
 
 SPI 刻意只有五个操作：
 
@@ -70,7 +103,7 @@ data class ObjectStoreCapabilities(
 
 ---
 
-## 3. 两类失败，两种应对
+## 4. 两类失败，两种应对
 
 | 情形 | 怎么发现 | 怎么应对 |
 |---|---|---|
@@ -81,7 +114,7 @@ data class ObjectStoreCapabilities(
 
 ---
 
-## 4. 跑 conformance 套件
+## 5. 跑 conformance 套件
 
 套件在 `yb-objectstore`，`./gradlew build` 里就会跑：
 
@@ -121,7 +154,7 @@ CI 会把矩阵贴进 job summary 并作为 artifact 上传。**兼容矩阵是�
 
 ---
 
-## 5. 验证一个新后端
+## 6. 验证一个新后端
 
 1. 用上面的环境变量跑 conformance 套件。❌ 要么修好，要么诚实地把能力声明成 `false`。
 2. 用**真实后端**跑一遍集成测试（`./gradlew integrationTest`，把 store 指过去）。这一步才会压到 LSM/事务层，而不只是 SPI。

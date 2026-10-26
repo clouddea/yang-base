@@ -26,7 +26,40 @@ This page covers which backends work, what "works" means precisely, and how to v
 
 ---
 
-## 2. What the backend contract actually is
+## 2. Configuring a backend: provider presets
+
+Connecting a new backend used to mean filling in four things by hand — endpoint, region, addressing style, capability declaration — and two of them **fail silently when wrong**: path-style addressing against Aliyun OSS returns `SecondLevelDomainForbidden`, and S3-style conditional headers against OSS are rejected outright (400) rather than ignored.
+
+`--s3-provider` encodes those four into one preset:
+
+```bash
+# Aliyun OSS: endpoint is derived from the region, virtual-host addressing,
+# atomic create via x-oss-forbid-overwrite, no ETag CAS
+yb-server --s3-provider oss --s3-region cn-hangzhou \
+          --s3-bucket my-bucket --s3-access-key "$AK" --s3-secret-key "$SK"
+
+# MinIO / self-hosted gateway: endpoint required, path-style addressing
+yb-server --s3-provider minio --s3-endpoint http://127.0.0.1:9000 \
+          --s3-bucket yangbase --s3-access-key "$AK" --s3-secret-key "$SK"
+```
+
+| Provider id | Endpoint | Default region | Addressing | Capabilities | Verified |
+|---|---|---|---|---|---|
+| `aws` (default) | SDK-resolved | `us-east-1` | auto | full S3 | ✅ |
+| `minio` | must be given | `us-east-1` | path | full S3 | ✅ |
+| `oss` | `https://oss-{region}.aliyuncs.com` | `cn-hangzhou` | virtual-host | **no ETag CAS**, `FORBID_OVERWRITE` | ✅ on the real service |
+| `cos` | `https://cos.{region}.myqcloud.com` | `ap-guangzhou` | virtual-host | full S3 (assumed) | ❌ not yet |
+| `obs` | `https://obs.{region}.myhuaweicloud.com` | `cn-north-4` | virtual-host | full S3 (assumed) | ❌ not yet |
+| `r2` | must be given (`https://<account>.r2.cloudflarestorage.com`) | `auto` | path | full S3 (assumed) | ❌ not yet |
+| `b2` | `https://s3.{region}.backblazeb2.com` | `us-west-004` | path | full S3 (assumed) | ❌ not yet |
+
+Explicit flags always win over the preset (`--s3-endpoint`, `--s3-region`, `--s3-path-style`). `--s3-oss` is kept as a deprecated alias for `--s3-provider oss`.
+
+**Presets declare an _upper bound_ of capabilities, not a promise.** The startup probe measures the real backend and intersects (`declared ∩ measured`), so a preset that is too optimistic gets corrected — or the server refuses to start. That is why `cos`/`obs`/`r2`/`b2` can ship with "full S3" declared while still being marked *not verified*: the declaration means "try standard S3 semantics first", not "we tested it".
+
+---
+
+## 3. What the backend contract actually is
 
 The SPI is deliberately narrow — five operations:
 
@@ -70,7 +103,7 @@ Two rules follow from this, and both are enforced as bugs, not conventions:
 
 ---
 
-## 3. Two different failures, two different responses
+## 4. Two different failures, two different responses
 
 | Situation | Detection | Response |
 |---|---|---|
@@ -81,7 +114,7 @@ The distinction matters because the two produce the same symptom later (corrupte
 
 ---
 
-## 4. Running the conformance suite
+## 5. Running the conformance suite
 
 The suite lives in `yb-objectstore` and runs as part of `./gradlew build`:
 
@@ -121,7 +154,7 @@ Basic semantics (roundtrip, empty object, 1 MiB object, missing key, HEAD metada
 
 ---
 
-## 5. Verifying a new backend
+## 6. Verifying a new backend
 
 1. Run the conformance suite against it with the environment variables above. Fix ❌ rows or declare the capability honestly as `false`.
 2. Run the integration suite against it — `./gradlew integrationTest` with the store pointed at the backend. This exercises the LSM/transaction layers, not only the SPI.
