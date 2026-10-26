@@ -368,17 +368,23 @@ class YbCliTest {
     fun `recover-check 能发现被删掉的 SST 数据对象`() {
         seed()
         // 手动制造「manifest 引用了但对象不存在」——这是最危险的一类损坏，
-        // 因为它不会在启动时报错，只会在读那一块数据时才炸
-        val victim = Files.walk(storeDir)
-            .filter { it.toString().endsWith(".dat") }
-            .findFirst().orElse(null)
-        requireNotNull(victim) { "测试需要至少一个 .dat 对象" }
-        Files.delete(victim)
+        // 因为它不会在启动时报错，只会在读那一块数据时才炸。
+        //
+        // ⚠️ 这里必须删**全部** `.dat`，不能只删 `Files.walk` 找到的第一个：
+        // 一个分片可能已经被 flush/compaction 多轮，目录里同时存在**旧版本**的 SST，
+        // 而旧 SST 不再被当前 manifest 引用 —— 全部删掉的话，旧的自然无害，
+        // 被删掉的“当前” SST 一定会被报出来。
+        // 只删一个会因文件系统 walk 顺序而随机失败（在 CI 的 overlayfs 上就翻车过）。
+        val victims = Files.walk(storeDir).use { s ->
+            s.filter { it.toString().endsWith(".dat") }.toList()
+        }
+        require(victims.isNotEmpty()) { "测试需要至少一个 .dat 对象" }
+        victims.forEach { Files.delete(it) }
 
         val out = cli("recover-check")
         assertTrue(
             out.contains("缺失对象") || out.contains("✗"),
-            "被 manifest 引用但缺失的对象必须被报出来：\n$out",
+            "被 manifest 引用但缺失的对象必须被报出来（已删 ${victims.size} 个 .dat）：\n$out",
         )
     }
 
