@@ -103,6 +103,72 @@ class MysqldumpCompatTest {
 
     }.getOrElse { "<线程转储失败：${it::class.simpleName}: ${it.message}>" }
 
+    /**
+     * 走**原始协议**发一条 COM_QUERY，返回应答的第一个字节（0x00 = OK、
+     * 0xff = ERR、其他 = 结果集头部）。
+     *
+     * 为什么不用 JDBC：这个用例守的是"服务端必须**回**一个包"，
+     * 而 JDBC 会在更上层把"没回包"包装成超时异常，看不出协议层的问题。
+     * 这里超时就是超时——正是要复现的症状。
+     */
+    private fun rawQuery(port: Int, sql: String, timeoutMs: Int = 5_000): Int {
+        Socket().use { s ->
+            s.soTimeout = timeoutMs
+            s.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
+            val ins = DataInputStream(s.getInputStream())
+            val out = s.getOutputStream()
+
+            // 读问候包（不解析内容，只要把序号对齐）
+            val helloLen = ByteArray(3).also { ins.readFully(it) }
+            val len = (helloLen[0].toInt() and 0xFF) or
+                ((helloLen[1].toInt() and 0xFF) shl 8) or
+                ((helloLen[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte()
+            ins.readFully(ByteArray(len))
+
+            // 握手响应：PROTOCOL_41 | SECURE_CONNECTION | PLUGIN_AUTH，空密码
+            val caps = 0x0200 or 0x8000 or 0x00080000
+            val payload = java.io.ByteArrayOutputStream()
+            fun u32(v: Int) {
+                payload.write(v and 0xFF); payload.write((v ushr 8) and 0xFF)
+                payload.write((v ushr 16) and 0xFF); payload.write((v ushr 24) and 0xFF)
+            }
+            u32(caps); u32(0); payload.write(33)          // utf8_general_ci
+            repeat(23) { payload.write(0) }
+            payload.write("root".toByteArray()); payload.write(0)
+            payload.write(0)                              // auth 长度 = 0（空密码）
+            payload.write("mysql_native_password".toByteArray()); payload.write(0)
+            out.write(frame(payload.toByteArray(), 1))
+
+            val okLen = ByteArray(3).also { ins.readFully(it) }
+            val okBytes = (okLen[0].toInt() and 0xFF) or
+                ((okLen[1].toInt() and 0xFF) shl 8) or
+                ((okLen[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte()
+            ins.readFully(ByteArray(okBytes))
+
+            // COM_QUERY
+            val body = byteArrayOf(0x03) + sql.toByteArray(Charsets.UTF_8)
+            out.write(frame(body, 0))
+            out.flush()
+
+            val rLen = ByteArray(3).also { ins.readFully(it) }
+            val rBytes = (rLen[0].toInt() and 0xFF) or
+                ((rLen[1].toInt() and 0xFF) shl 8) or
+                ((rLen[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte()
+            val resp = ByteArray(rBytes)
+            ins.readFully(resp)
+            return resp[0].toInt() and 0xFF
+        }
+    }
+
+    /** MySQL 包格式：3 字节小端长度 + 1 字节序号 + 载荷。 */
+    private fun frame(payload: ByteArray, seq: Int): ByteArray {
+        val n = payload.size
+        return byteArrayOf((n and 0xFF).toByte(), ((n ushr 8) and 0xFF).toByte(), ((n ushr 16) and 0xFF).toByte(), seq.toByte()) + payload
+    }
+
     private lateinit var dataDir: java.nio.file.Path
     private lateinit var server: YangBaseServer
     private var port: Int = 0
@@ -255,6 +321,26 @@ class MysqldumpCompatTest {
     }
 
     // ── 工具依赖的会话行为 ────────────────────────────────────────
+
+
+    /**
+     * **纯注释的 COM_QUERY 必须回 OK，不能一声不吭。**
+     *
+     * 这条守的是一个真实故障：`mysql` 客户端导入 mysqldump 产物时整个挂死 120 秒，
+     * 因为 dump 的第一行是 `-- MySQL dump 10.13 …`，而 MySQL 8.4 的客户端会把它
+     * 原样放进 COM_QUERY 发出来。服务端解析出 0 条语句，于是**一个字节也不回**，
+     * 客户端等着一个永远不会来的应答。
+     *
+     * 本地复现不了的原因：8.0 客户端在客户端侧就把注释剥掉了。
+     */
+    @Test
+    fun `只有注释的查询必须回 OK 而不是不回包`() {
+        assertEquals(0x00, rawQuery(port, "-- MySQL dump 10.13  Distrib 8.4.11, for Linux (x86_64)"), "注释查询必须回 OK")
+        assertEquals(0x00, rawQuery(port, "--\n"), "只有换行的注释也必须回 OK")
+        assertEquals(0x00, rawQuery(port, "   "), "空白查询必须回 OK（真实 MySQL 同样如此）")
+        // 顺带确认：正常语句仍然正常
+        assertEquals(0x00 or 0x00, rawQuery(port, "SET @a = 1"), "普通语句仍然要回 OK")
+    }
 
     @Test
     fun `用户变量能存能取且不遮蔽系统变量`() {

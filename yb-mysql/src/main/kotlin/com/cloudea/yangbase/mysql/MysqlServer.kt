@@ -443,6 +443,20 @@ class MysqlConnection(
 
     private suspend fun handleQuery(sql: String) {
         val stmts = Parser.parseAll(sql)
+        // ★ **只有注释（或整个是空白）的 COM_QUERY 必须回一个 OK。**
+        //
+        // `Parser.parseAll` 对这种输入返回**空列表**（没有语句可解析），而下面的
+        // 循环一次都不执行、于是一个字节也不回。协议里"每条命令一条应答"，
+        // 客户端于是永远等在那里——`mysql` 客户端导入 mysqldump 产物时就这样挂死，
+        // 因为 dump 的第一行是 `-- MySQL dump 10.13 …` 这类注释，
+        // 而 MySQL 8.4 的客户端会把注释放进 COM_QUERY 发出来（8.0 客户端先自己剥掉，
+        // 所以在本地永远复现不了，只在 CI 上炸）。
+        //
+        // 真实 MySQL 对空查询与纯注释查询都返回 OK（0 affected rows）。
+        if (stmts.isEmpty()) {
+            sendOk(0, 0)
+            return
+        }
         // ★ 多语句只有在客户端**协商过** `CLIENT_MULTI_STATEMENTS` 时才执行。
         // 无条件执行是危险的：`CLIENT_MULTI_STATEMENTS` 本来是一个让客户端
         // 明确声明「我知道这条 SQL 里可能有多个语句」的开关，SQL 注入防护
