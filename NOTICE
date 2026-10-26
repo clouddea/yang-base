@@ -1,0 +1,34 @@
+YangBase
+Copyright 2026 YangBase Authors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+Source repository: https://github.com/clouddea/yang-base
+
+---
+
+Third-party components
+----------------------
+
+YangBase depends on third-party libraries resolved at build time via Gradle.
+Their licenses are declared in each dependency's own artifact metadata
+(POM / Gradle module metadata). No third-party source code is vendored into
+this repository.
+
+If you redistribute a binary build of YangBase, you are responsible for
+shipping the license texts of its runtime dependencies alongside your
+distribution.
+
+---
+
+Trademarks
+----------
+
+"MySQL" is a trademark of Oracle Corporation.
+"PostgreSQL" is a trademark of the PostgreSQL Community Association of Canada.
+"MinIO", "Amazon S3", "Aliyun OSS", "Tencent COS", "Huawei OBS",
+"Cloudflare R2" and "Backblaze B2" are trademarks of their respective owners.
+
+Use of these names in this project is descriptive only and does not imply
+any affiliation with, endorsement by, or sponsorship from those owners.
