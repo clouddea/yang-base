@@ -91,10 +91,16 @@ class MysqldumpCompatTest {
             out.absolutePath,
         ).redirectErrorStream(true).start()
         p.waitFor(20, TimeUnit.SECONDS)
-        val text = runCatching { out.readText() }.getOrDefault("<读不到转储>")
+        val raw = runCatching { out.readText() }.getOrDefault("<读不到转储>")
         dir.toFile().deleteRecursively()
-        if (text.isBlank()) return@runCatching "<jcmd 产出了空文件：Thread.dump_to_file 可能拒绝写目标路径>"
-        text
+        if (raw.isBlank()) return@runCatching "<jcmd 产出了空文件：Thread.dump_to_file 可能拒绝写目标路径>"
+        // 只留与我们有关的线程：截断末尾 N 个字符会把 yb-conn 那一段切掉（第一版就切掉了）。
+        val blocks = raw.split(Regex("(?m)^#\\d+ \""))
+        val keep = blocks.filter { b ->
+            listOf("yb-conn", "yb-mysql", "Atomically", "ForkJoin", "Test worker", "yb-shard").any { b.contains(it) }
+        }
+        if (keep.isEmpty()) raw.takeLast(8_000) else keep.joinToString("\n\n") { "#\"" + it }
+
     }.getOrElse { "<线程转储失败：${it::class.simpleName}: ${it.message}>" }
 
     private lateinit var dataDir: java.nio.file.Path
@@ -349,8 +355,28 @@ class MysqldumpCompatTest {
             val server2 = YangBaseServer.forTesting(
                 store = com.cloudea.yangbase.objectstore.LocalFileObjectStore(dir2), port = 0,
             )
-            // 协议级 trace：只在这个用例里打开，输出走 stderr（Gradle 会收进测试日志）。
-            // 客户端挂住时，"服务端收到了哪一步"是唯一能定位的线索。
+            // 协议级 trace：只在这个用例里打开。
+            // ⚠️ 光靠 stderr 不行：Gradle 默认不把测试进程的 stderr 打进 CI 日志
+            // （断言消息会显示，println/stderr 不会）。所以这里把 System.err 复制一份到文件，
+            // 失败时连同 trace 一起塞进断言消息——客户端挂住时，"服务端收到了哪一步"
+            // 是唯一能定位的线索。
+            val serverTrace = File.createTempFile("yangbase-proto-trace", ".log")
+            val realErr = System.err
+            runCatching {
+                System.setErr(
+                    java.io.PrintStream(
+                        object : java.io.OutputStream() {
+                            private val a = java.io.FileOutputStream(serverTrace, true)
+                            override fun write(b: Int) { realErr.write(b); a.write(b) }
+                            override fun write(b: ByteArray, off: Int, len: Int) {
+                                realErr.write(b, off, len); a.write(b, off, len)
+                            }
+                            override fun flush() { realErr.flush(); a.flush() }
+                        },
+                        true,
+                    ),
+                )
+            }
             System.setProperty("yb.mysql.trace", "1")
             server2.start()
             // 「先证明服务端能服务，再让客户端上」：探针失败时立刻断在这里，
@@ -418,6 +444,10 @@ class MysqldumpCompatTest {
                             appendLine("进程是否存活：${restore.isAlive}")
                             appendLine("dump 文件：${dump.absolutePath}（${dump.length()} 字节）")
                             appendLine("server2 握手探针：通过（server version = $greeting）→ 服务端能服务，问题在客户端侧")
+                            appendLine("server2 活跃连接数：${server2.liveConnectionCount}")
+                            appendLine()
+                            appendLine("──── 服务端协议 trace（最后 6000 字符）────")
+                            appendLine(runCatching { serverTrace.readText() }.getOrDefault("").takeLast(6_000))
                             appendLine("客户端输出（${partial.length} 字符，取末尾 4000）：")
                             appendLine(if (partial.isEmpty()) "<空：客户端一个字都没输出>" else partial.takeLast(4_000))
                             appendLine()
@@ -454,6 +484,8 @@ class MysqldumpCompatTest {
                 }
             } finally {
                 System.clearProperty("yb.mysql.trace")
+                runCatching { System.setErr(realErr) }
+                runCatching { serverTrace.delete() }
                 runCatching { server2.stop() }
                 runCatching { dir2.toFile().deleteRecursively() }
                 runCatching { dump.delete() }
