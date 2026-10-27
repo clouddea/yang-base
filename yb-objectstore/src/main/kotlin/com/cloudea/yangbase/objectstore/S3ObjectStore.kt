@@ -148,6 +148,18 @@ class S3ObjectStore(
                 when {
                     ossCreateConflict ->
                         throw PreconditionFailedException("前置条件不成立（对象已存在）: key=$key", e)
+                    // ★ 412 有两张面孔，只看状态码是分不开的——必须看**我们自己发的那个前置条件**：
+                    //
+                    //   · `MustNotExist` 失败 → 对象已存在：确定结论，重发永远不会成功
+                    //   · `MustMatch` 失败    → etag 已变：**并发冲突**，重读当前值后可以再试
+                    //     （真实 S3 与内嵌服务器都是 412；对象已经不存在的情况走 404 分支）
+                    //
+                    // 曾经这里一律判成前者，于是 manifest 指针的 CAS 失败在 S3 上被报成
+                    // 「确定失败」——fencing / 重读重试那条分支永远接不住它，而同样的场景
+                    // 在内存与本地 FS 后端上抛的是 `ConcurrentModificationException`。
+                    // 同一个语义在后端之间分裂成两种异常，是 issue #8。
+                    precondition is Precondition.MustMatch && e.statusCode() == 412 ->
+                        throw ConcurrentModificationException("条件写并发冲突（etag 已变）: key=$key", e)
                     e.statusCode() == 412 ->
                         throw PreconditionFailedException("前置条件不成立: key=$key", e)
                     // 409 = 并发冲突 → 条件结论未知，可退避重试（§3.3.1）

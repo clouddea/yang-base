@@ -5,15 +5,19 @@ sealed class YangBaseException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
 
 /**
- * 对象存储的前置条件不成立。
+ * 条件写的前置条件不成立，**且结论是确定的**——重发永远不会成功。
  *
- * 必须区分 [PreconditionFailed]（条件确定不成立，**不要重试**）与
- * [Conflict]（并发冲突，可退避重试）。见设计文档 §3.3.1。
+ * 现在的语义是「**目标状态**不成立」：`MustNotExist` 撞上已存在的对象。
+ * 而「目标状态还在，但已经被别人改过了」（`MustMatch` 的 etag 不匹配）**不是**这一类，
+ * 它是 [ConcurrentModificationException]：重读当前值再试是可能成功的。
+ *
+ * 这条区分曾经在 S3 上丢失过（两个场景都返回 412，旧实现一律归成这一类），
+ * 后果是 manifest 指针的 CAS 失败被当成"确定失败"、fencing 分支接不住。见 issue #8。
  */
 class PreconditionFailedException(message: String, cause: Throwable? = null) :
     YangBaseException(message, cause)
 
-/** 条件写并发冲突，可退避重试。 */
+/** 条件写并发冲突（`MustMatch` 的 etag 已变），**重读当前值后可以再试**。 */
 class ConcurrentModificationException(message: String, cause: Throwable? = null) :
     YangBaseException(message, cause)
 
@@ -36,7 +40,10 @@ class CapabilityNotSupportedException(message: String) :
  *
  * 判据见设计文档 §3.3.1：
  *  - `5xx` / `429` / `408` / 超时 / 网络中断 → `true`（瞬时故障，重发可能成功）
- *  - `412 PreconditionFailed` → 由 [PreconditionFailedException] 表达，**绝不可重试**
+ *  - `412 PreconditionFailed` → **按前置条件分两种**：`MustNotExist` 失败是
+ *    [PreconditionFailedException]（绝不可重试）；`MustMatch` 失败是
+ *    [ConcurrentModificationException]（重读后可重试）。两者在 S3 上是同一个状态码，
+ *    只有发起请求的那一方知道该算哪一类
  *  - `409 ConditionalRequestConflict` → 由 [ConcurrentModificationException] 表达，可退避重试
  *  - `404` → 由 [ObjectNotFoundException] 表达，是明确的业务语义，**不可重试**
  *
