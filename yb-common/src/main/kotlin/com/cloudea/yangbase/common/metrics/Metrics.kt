@@ -538,6 +538,7 @@ object Metrics {
     private val leaseFailed = registry.counter("yb_lease_acquisitions_total", "result" to "failed")
     private val leaseLost = registry.counter("yb_lease_lost_total")
     private val leaseRenewalFailed = registry.counter("yb_lease_renewal_failed_total")
+    private val leaseRenewRetried = registry.counter("yb_lease_renewal_recovered_total")
     private val shardsEvicted = registry.counter("yb_shards_evicted_total")
 
     init {
@@ -551,6 +552,12 @@ object Metrics {
             "续期请求本身失败了（网络抖动、后端故障、凭证过期）。" +
                 "与 yb_lease_lost_total 的区别：那个是**确认**被别人接管，这个是**不知道**——" +
                 "两者都会让本节点停止写入，但排查方向完全不同（先看日志里的异常）",
+        )
+        registry.help(
+            "yb_lease_renewal_recovered_total",
+            "续期失败后**查询发现租约仍在自己手上**（典型：PUT 成功但响应丢了），" +
+                "于是采纳刷新的凭据继续当写者、没有停写。非零说明网络在丢响应——" +
+                "不是故障，但值得查（它以前会直接把分片误判成“被别人接管”）",
         )
     }
 
@@ -576,6 +583,9 @@ object Metrics {
      * 两者都会让本节点停止写入——但归因线索如果混在一个计数里，就只能靠猜。
      */
     fun onLeaseRenewalFailed() = leaseRenewalFailed.inc()
+
+    /** 续期失败但确认租约仍在自己手上（响应丢了）：采纳新凭据继续，没停写。 */
+    fun onLeaseRenewRetried() = leaseRenewRetried.inc()
 
     private val manifestPointerRaced = registry.counter("yb_manifest_pointer_raced_total")
     private val manifestOrphanSnapshots = registry.counter("yb_manifest_orphan_snapshots_total")

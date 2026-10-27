@@ -50,6 +50,17 @@ class LeaseManager(
     val holder: String,
     /** 租约时长。必须**显著大于**分片恢复时间（设计文档 §6.8 估算是 3–5s）。 */
     val ttlMillis: Long = 15_000,
+    /**
+     * 本**实例**的标识（每个 `LeaseManager` 对象生成一个）。
+     *
+     * 与 [holder] 的区别是这两个问题的答案不同：
+     *  - `holder` 回答「哪个节点」，部署时给定，可以重复（某些人真会把两个 CN 都叫 `cn-1`）；
+     *  - `instance` 回答「同一个进程吗」，所以续期失败后可以直接判断「占有者还是我」。
+     *
+     * 这条字段**只用于本地判断**，不承担互斥责任：即使两个进程的 `holder` 相同，
+     * 它们的 `instance` 也必定不同，于是"自己接自己的班"不会变成两个写者。
+     */
+    val instance: String = java.util.UUID.randomUUID().toString().substring(0, 8),
 ) : com.cloudea.yangbase.storage.LeaseProvider {
 
     /**
@@ -65,6 +76,8 @@ class LeaseManager(
         val expiresAtMillis: Long,
         /** CAS 凭据。续期与释放都要带上它。 */
         val etag: String,
+        /** 取得它的那个进程实例（见 [LeaseManager.instance]）。旧对象里没有这个字段时为空串。 */
+        val instance: String = "",
     ) : com.cloudea.yangbase.storage.ShardLease {
         override fun isExpired(now: Long): Boolean = now >= expiresAtMillis
 
@@ -85,6 +98,8 @@ class LeaseManager(
         val holder: String,
         val epoch: Long,
         val expiresAtMillis: Long,
+        /** 持有它的进程实例；旧对象或已释放时为空串。 */
+        val instance: String = "",
     ) {
         fun isExpired(now: Long = System.currentTimeMillis()): Boolean = now >= expiresAtMillis
 
@@ -116,6 +131,7 @@ class LeaseManager(
             epoch = snap.epoch,
             expiresAtMillis = snap.expiresAtMillis,
             etag = meta.etag.value,
+            instance = snap.instance,
         )
     }
 
@@ -143,7 +159,17 @@ class LeaseManager(
         holder = Regex("\"holder\"\\s*:\\s*\"([^\"]*)\"").find(text)?.groupValues?.get(1) ?: "",
         epoch = Regex("\"epoch\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
         expiresAtMillis = Regex("\"expiresAt\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
+        instance = Regex("\"instance\"\\s*:\\s*\"([^\"]*)\"").find(text)?.groupValues?.get(1) ?: "",
     )
+
+    /**
+     * 【本进程发出的租约】吗？
+     *
+     * 两个条件缺一不可：`holder` 相同只说明“同一台节点”，`instance` 相同才说明
+     * “同一个进程”。两个 CN 被误配成同一个 `--node-id` 时，`holder` 会相等而
+     * `instance` 不同——这正是不能只凭 `holder` 就把租约认成自己的原因。
+     */
+    private fun isMine(it: Lease): Boolean = it.holder == holder && it.instance == instance
 
     /**
      * 取得分片的写者租约。
@@ -159,6 +185,18 @@ class LeaseManager(
         while (true) {
             val cur = current(shard)
             if (cur != null && !cur.isExpired()) {
+                // ★ 如果是**本进程自己**（同一 instance、同一 epoch）仍持有的那把：
+                // 采纳它，而不是报"被别人持有"。
+                //
+                // 什么时候会走到这里：续租失败把 `leaseLost` 置上之后，下一次写会
+                // 重新 acquire，而租约对象上写的持有者就是自己。旧代码在这里直接报
+                // “分片 x 的写者租约被 'cn-a' 持有”——**被自己持有**，运维看到这句
+                // 话无从下手，而且该分片会一直不可写直到 TTL 过期。
+                //
+                // ⚠️ 只认 instance，**不认 holder**：两个 CN 被误配成同一个
+                // `--node-id` 时 holder 同样相等，那时必须继续报冲突——否则租约
+                // 防的就是“两个写者”，而这里恰好会造出两个写者。
+                if (isMine(cur)) return cur
                 // ★ 错误码 1205（而不是 1105）：见 LsmStore.ensureWriter 的说明——
                 // 「资源被别人占着、稍后重试」在这个系统里是**确定可重试**的语义，
                 // 1205 让 JDBC 客户端把它映射成可重试的事务异常，1105 则是一个死胡同。
@@ -170,14 +208,14 @@ class LeaseManager(
             }
             val nextEpoch = (cur?.epoch ?: 0L) + 1
             val expires = System.currentTimeMillis() + ttlMillis
-            val payload = """{"holder":"$holder","epoch":$nextEpoch,"expiresAt":$expires}""".toByteArray()
+            val payload = """{"holder":"$holder","instance":"$instance","epoch":$nextEpoch,"expiresAt":$expires}""".toByteArray()
             val pre = if (cur == null) Precondition.MustNotExist else Precondition.MustMatch(
                 com.cloudea.yangbase.objectstore.ETag(cur.etag)
             )
             try {
                 val etag = store.put(keyOf(shard), payload, pre)
                 Metrics.onLeaseAcquired()
-                return Lease(shard, holder, nextEpoch, expires, etag.value)
+                return Lease(shard, holder, nextEpoch, expires, etag.value, instance)
             } catch (_: ConcurrentModificationException) {
                 // 有人抢先了，重读
                 Metrics.onLeaseContended()
@@ -212,7 +250,7 @@ class LeaseManager(
 
     private suspend fun renewInternal(lease: Lease): Lease {
         val expires = System.currentTimeMillis() + ttlMillis
-        val payload = """{"holder":"$holder","epoch":${lease.epoch},"expiresAt":$expires}""".toByteArray()
+        val payload = """{"holder":"$holder","instance":"$instance","epoch":${lease.epoch},"expiresAt":$expires}""".toByteArray()
         return try {
             val etag = store.put(
                 keyOf(lease.shard), payload,
@@ -230,6 +268,26 @@ class LeaseManager(
     }
 
     /**
+     * 确认租约还在不在自己手上（见 [com.cloudea.yangbase.storage.LeaseProvider.confirm]）。
+     *
+     * 为什么这里必须区分 `holder` 与 `instance`：续期超时的典型情形是
+     * **PUT 已经成功、只是响应丢了**——于是对象上的 holder 仍是我们、epoch 未变，
+     * 但 etag 已经变了。旧代码接下来用旧 etag 续期 ⇒ 412 ⇒ 判作“被挤占”
+     * ⇒ 一个合法的写者自己停写，且下一次 acquire 还会报“被自己持有”。
+     * 靠 `instance` 就能把这两种情形分干净：换了人（instance 不同）= 确实丢了；
+     * 同一个人（instance 相同）= 只是凭据过期，采纳新 etag 即可。
+     */
+    override suspend fun confirm(lease: com.cloudea.yangbase.storage.ShardLease):
+        com.cloudea.yangbase.storage.ShardLease? {
+        require(lease is Lease) { "LeaseManager 只处理自己发出的租约" }
+        val cur = current(lease.shard) ?: return null
+        if (!isMine(cur)) return null          // 换了人（或换了 epoch）
+        if (cur.epoch != lease.epoch) return null
+        if (cur.isExpired()) return null
+        return cur                              // 仍是自己的：etag / 到期时间已刷新
+    }
+
+    /**
      * 主动释放：清空 holder 并让 TTL 立刻到期。
      *
      * **不删除对象**。删掉会让下一个写者的 epoch 从 1 重新开始，
@@ -242,7 +300,7 @@ class LeaseManager(
     }
 
     private suspend fun releaseInternal(lease: Lease) {
-        val payload = """{"holder":"","epoch":${lease.epoch},"expiresAt":0}""".toByteArray()
+        val payload = """{"holder":"","instance":"","epoch":${lease.epoch},"expiresAt":0}""".toByteArray()
         runCatching {
             store.put(
                 keyOf(lease.shard), payload,

@@ -58,6 +58,13 @@ jobs:
       - name: Build, test, verify coverage
         run: ./gradlew build --no-daemon --stacktrace
 
+      # 一个永远不跑但永远绿的测试，比没有测试更糟：它会让「这条路径有覆盖」变成一句谎话。
+      # JUnit 5 对「返回非 void」的方法**静默跳过**，而 Kotlin 的表达式体
+      # `fun x() = runBlocking { … }` 恰好会生成这种签名（最后一个表达式有值就不再是 void）。
+      # 这个坑两天踩了两次（10-26 扫出 3 条，10-27 又在新写的测试里复现 1 条），所以上机器门禁。
+      - name: Reject test methods JUnit would silently skip
+        run: scripts/check-test-methods.sh
+
       # 后端一致性矩阵：**兼容矩阵不是手写的文档**，而是这次 CI 的真实结果。
       # 矩阵由 ObjectStoreConformanceTest 产出（行=后端，列=用例，
       # ⊘=后端声明不支持该能力所以跳过，❌=声明支持却没做到）。
