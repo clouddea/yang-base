@@ -68,6 +68,11 @@ Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibab
   (RPO ceiling = 64 batches), and metrics that state the window explicitly.
 - Apache-2.0 license, CI (build + coverage gate + integration + real-OSS nightly), issue/PR
   templates, security policy, English README, bilingual docs (`docs/en`, `docs/zh`).
+- **`docker compose up -d --wait` gets a queryable server in about a minute**: a multi-stage image
+  (JDK build → JRE runtime, non-root, health check on the MySQL port) plus a compose file that
+  brings up an S3-compatible object store. Compose is health-gated, so `--wait` returns only after
+  the server really accepts MySQL connections; CI runs the same stack and queries it with a real
+  MySQL client.
 
 ### Changed
 

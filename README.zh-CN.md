@@ -81,6 +81,25 @@
 
 ## 快速开始
 
+### 60 秒跑起来（Docker）
+
+```bash
+docker compose up -d --wait     # YangBase + S3 兼容对象存储
+mysql -h 127.0.0.1 -P 3306 -uroot
+```
+
+```sql
+CREATE DATABASE demo;
+USE demo;
+CREATE TABLE orders (id BIGINT PRIMARY KEY, item VARCHAR(32), amount DECIMAL(10,2));
+INSERT INTO orders VALUES (1,'apple',3.50),(2,'banana',1.20),(3,'apple',4.25);
+SELECT item, COUNT(*), SUM(amount) FROM orders GROUP BY item;
+```
+
+跑的是**真的那套东西**：无状态计算节点 + S3 兼容对象存储 + 架在上面的存储引擎，
+不是本地盘捷径。`docker-compose.yml` 里的凭据仅供开发；这个版本没有认证与 TLS，
+请放在受信网络里。
+
 ### 构建与测试
 
 ```bash
