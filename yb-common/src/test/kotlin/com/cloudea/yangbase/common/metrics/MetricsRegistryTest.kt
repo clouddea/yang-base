@@ -151,7 +151,7 @@ class MetricsRegistryTest {
     fun `查询类型枚举与文档的标签值一致`() {
         assertEquals(listOf("point", "range", "scan", "fulltext", "other"), QueryType.entries.map { it.wire })
         assertEquals(
-            listOf("get", "get_range", "put", "put_cond", "delete", "list", "head"),
+            listOf("get", "get_range", "put", "put_cond", "delete", "delete_batch", "list", "head"),
             StoreOp.entries.map { it.wire },
         )
     }

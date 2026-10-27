@@ -138,6 +138,8 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
                 // multipart 的创建与完成都是 POST 到同一个 key 上，
                 // 靠 query 参数区分：`?uploads` 创建，`?uploadId=...` 完成
                 "POST" -> when {
+                    // 批量删除：`POST /{bucket}?delete`（AWS 叫 DeleteObjects）
+                    query.containsKey("delete") -> deleteMultiple(ex)
                     query.containsKey("uploads") -> createMultipart(ex, key)
                     query["uploadId"] != null -> completeMultipart(ex, key, query["uploadId"]!!)
                     else -> { drainBody(ex); respond(ex, 400, "BadRequest".toByteArray(), "text/plain") }
@@ -266,6 +268,57 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
         ex.responseHeaders.add("ETag", etag)
         respond(ex, 200, ByteArray(0), "application/octet-stream")
     }
+
+    /**
+     * 批量删除（`POST /{bucket}?delete`）。
+     *
+     * 必须实现，不是可选项：清桶路径（GC / `DROP TABLE` / 测试的 `wipe()`）在生产上
+     * 走的就是它，而夹具若只支持逐个删，这条路径在集成测试里**永远跑不到**——
+     * 等于没实现。
+     *
+     * 两处语义刻意跟 S3 对齐：
+     *  - **不存在的键也报 `Deleted`**（这就是它的契约；要判断存在性用 HEAD）
+     *  - **超过 1000 个键一律 400**，让上层的分页逻辑（`chunked(max)`）真的被跑到
+     */
+    private fun deleteMultiple(ex: HttpExchange) {
+        bump("DeleteObjects")
+        val body = String(ex.requestBody.readBytes(), Charsets.UTF_8)
+        val keys = Regex("<Key>(.*?)</Key>", RegexOption.DOT_MATCHES_ALL)
+            .findAll(body)
+            .map { xmlUnescape(it.groupValues[1]) }
+            .toList()
+        if (keys.isEmpty()) {
+            respond(
+                ex, 400,
+                s3Error("MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema."),
+                "application/xml",
+            )
+            return
+        }
+        if (keys.size > 1000) {
+            respond(
+                ex, 400,
+                s3Error("MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema."),
+                "application/xml",
+            )
+            return
+        }
+        val out = StringBuilder("<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">")
+        for (k in keys) {
+            objects.remove(k)
+            out.append("<Deleted><Key>").append(xmlEscape(k)).append("</Key></Deleted>")
+        }
+        out.append("</DeleteResult>")
+        respond(ex, 200, out.toString().toByteArray(Charsets.UTF_8), "application/xml")
+    }
+
+    private fun xmlUnescape(s: String): String = s
+        .replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&apos;", "'")
+        .replace("&amp;", "&")
+
+    private fun xmlEscape(s: String): String = s
+        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     // ── multipart ─────────────────────────────────────────────────
     // 存在的理由：服务端拼接（UploadPartCopy）是跨区时不产生下行流量的唯一手段，

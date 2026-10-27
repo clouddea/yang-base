@@ -94,8 +94,16 @@ class IoBudgetIntegrationTest {
         Class.forName("com.mysql.cj.jdbc.Driver")
     }
 
-    private fun wipe(store: ObjectStore) = runBlocking {
-        store.listAll("").forEach { runCatching { store.delete(it) } }
+    private fun wipe(store: ObjectStore) = runBlocking<Unit> {
+        val keys = store.listAll("")
+        if (keys.isNotEmpty()) {
+            // 批量删（一次 1000 键）：这一片在真实 OSS 上跑到 23 分钟，幾乎全部花在清桶上。
+            // 失败退回逐个删，不让一个坏键把整批留下。
+            runCatching { store.deleteBatch(keys) }.onFailure { e ->
+                println("[IoBudgetIntegrationTest] 批量删除失败，退回逐个删：${e.message}")
+                keys.forEach { runCatching { store.delete(it) } }
+            }
+        }
     }
 
     @AfterTest

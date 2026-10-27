@@ -54,6 +54,18 @@ data class ObjectStoreCapabilities(
     val requestsAreBilled: Boolean = true,
     val serverSideCopy: Boolean = true,
     val eventNotification: Boolean = false,
+    /**
+     * 原生批量删除的单次请求最多能带多少个键；**0 表示没有原生批量删除**。
+     *
+     * S3 / OSS / COS / OBS / R2 / B2 的 `DeleteObjects`（`POST /?delete`）都是 1000，
+     * 但这里不写死：真实上限属于后端，用错的代价是 400 而不是慢。
+     *
+     * 为什么它是能力而不仅是性能优化：清桶路径（GC、`wipe()`、`DROP TABLE`）
+     * 快照里可能有上万键，逐个删就是上万次计费请求（原则 P4）。
+     * 单位是所有调用方共用的**请求数**，所以这个数字也直接决定了
+     * `CountingObjectStore` 的计数口径（见那里的注释）。
+     */
+    val batchDeleteMaxKeys: Int = 0,
 ) {
     init {
         require(!conditionalUpdate || conditionalCreate) {
@@ -73,6 +85,7 @@ data class ObjectStoreCapabilities(
             conditionalWriteVerified = true,
             serverSideCopy = true,
             eventNotification = true,
+            batchDeleteMaxKeys = 1000,
         )
 
         /**
@@ -103,6 +116,10 @@ data class ObjectStoreCapabilities(
             lowLatencyTier = true,
             lowLatencyTierSupportsConditionalWrite = false,
             serverSideCopy = true,
+            // OSS 的 DeleteMultipleObjects 同样一次 1000 键，但**要求 Content-MD5**。
+            // 实测确认（2026-10-27，杭州，真实桶）：SDK 自己带上了这个头，
+            // conformance 的批量删除用例在真实 OSS 上通过，所以这里可以开。
+            batchDeleteMaxKeys = 1000,
         )
     }
 }
@@ -191,6 +208,25 @@ interface ObjectStore {
 
     /** 删除对象（幂等）。对象不存在时返回 false。 */
     suspend fun delete(key: String): Boolean
+
+    /**
+     * 批量删除。返回**后端报告的已删除键数**。
+     *
+     * 默认实现逐个 [delete]，即 N 个键 = N 次请求（外加每次的 HEAD）。
+     * 声明了 [ObjectStoreCapabilities.batchDeleteMaxKeys] 的后端必须覆写成一次请求删多键，
+     * 把清桶路径的请求数从 `2N` 降到 `ceil(N/maxKeys)`——这是 GC / `DROP TABLE` /
+     * 恢复清理在真实对象存储上能不能跑得动的前提（原则 P4）。
+     *
+     * ⚠️ 计数语义**不等于**逐个 `delete`：原生批量 API（S3/OSS 的 `DeleteObjects`）
+     * 对**不存在的键**也报「已删除」，所以返回值不能用来判断「这些键原来存不存在」。
+     * 需要那个结论请用 [delete] 或 [exists]——这正是默认实现与原生实现唯一允许的差异，
+     * 且被 conformance 套件固定成「至少包含实际存在的键数」。
+     */
+    suspend fun deleteBatch(keys: Collection<String>): Int {
+        var deleted = 0
+        for (k in keys) if (delete(k)) deleted++
+        return deleted
+    }
 
     /** 按键字典序分页列举。 */
     suspend fun list(prefix: String, pageToken: String? = null, limit: Int = 1000): ListPage
