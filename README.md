@@ -82,6 +82,25 @@ Object storage is extremely cheap per byte, fully decoupled from compute, and co
 
 ## Quick start
 
+### 60 seconds, with Docker
+
+```bash
+docker compose up -d --wait     # YangBase + S3-compatible object storage
+mysql -h 127.0.0.1 -P 3306 -uroot
+```
+
+```sql
+CREATE DATABASE demo;
+USE demo;
+CREATE TABLE orders (id BIGINT PRIMARY KEY, item VARCHAR(32), amount DECIMAL(10,2));
+INSERT INTO orders VALUES (1,'apple',3.50),(2,'banana',1.20),(3,'apple',4.25);
+SELECT item, COUNT(*), SUM(amount) FROM orders GROUP BY item;
+```
+
+The stack runs the real thing: a stateless compute node, an S3-compatible object store, and the
+engine on top of it — not a local-disk shortcut. Credentials in `docker-compose.yml` are
+**development-only**; this version has no authentication or TLS, so keep it on a trusted network.
+
 ### Build and test
 
 ```bash

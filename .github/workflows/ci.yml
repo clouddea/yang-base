@@ -91,6 +91,51 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # ── Docker 镜像 + 一条命令起全套 ───────────────────────────────
+  # 这个 job 守的不是“镜像能构建”——那是编译器的事——而是**门面承诺**：
+  # README 顶部那三行命令真的能用，而且能用真 MySQL 客户端查到数据。
+  # 它也是 compose 文件唯一的自动验证：本机 Docker 环境不等于别人的。
+  docker:
+    name: docker · compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t yangbase:ci --build-arg YB_VERSION="$(tr -d '[:space:]' < version.txt)" .
+
+      - name: Bring the stack up
+        env:
+          YB_VERSION: ci
+          YANGBASE_PORT: '3307'
+        run: docker compose up -d --wait
+
+      - name: Query it with a real MySQL client
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h127.0.0.1 -P3307 -uroot --protocol=tcp 2>/dev/null; then break; fi
+            sleep 2
+          done
+          mysql -h127.0.0.1 -P3307 -uroot --protocol=tcp -e "
+            CREATE DATABASE smoke;
+            USE smoke;
+            CREATE TABLE t (id BIGINT PRIMARY KEY, item VARCHAR(32), amount DECIMAL(10,2));
+            INSERT INTO t VALUES (1,'apple',3.50),(2,'apple',4.25),(3,'banana',1.20);
+            SELECT item, COUNT(*), SUM(amount) FROM t GROUP BY item ORDER BY item;
+          "
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        env:
+          YB_VERSION: ci
+        run: docker compose down -v
+
   # ── 集成测试 ──────────────────────────────────────────────────
   # ⚠️ `integrationTest` **不在 build 里**（独立源集），必须单独跑。
   # 这些用例走项目内置的 S3 兼容服务器（真实 HTTP + 真实条件写），
