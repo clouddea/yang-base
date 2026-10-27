@@ -11,7 +11,11 @@ plugins {
 
 allprojects {
     group = "com.cloudea.yangbase"
-    version = "0.1.0-SNAPSHOT"
+    // Single source of truth for the version number: `version.txt` at the repo root.
+    // A release tag must equal it; `.github/workflows/release.yml` and
+    // `scripts/release-preflight.sh` both verify that mechanically, so a build
+    // can never claim a version that was never released.
+    version = rootProject.file("version.txt").readText().trim()
     repositories { mavenCentral() }
 }
 

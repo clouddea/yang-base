@@ -2,6 +2,7 @@
 
 > 生效日期：2026-10-26　决策人：杨圆飞
 > 一句话：**任何新需求、bugfix 都必须走 PR；feature/bugfix 合入 `dev/<version>`，`dev/<version>` 统一合入 `main`。**
+> 版本号语义、发布节奏、冻结规则与发布门禁在 [versioning.md](versioning.md)，本文只管分支与 PR 操作。
 
 ---
 
@@ -58,15 +59,23 @@ gh pr create --base dev/0.1.0 --fill
 ## 3. 发布流程
 
 ```bash
-# dev/0.1.0 上所有计划项完成、CI 绿
-gh pr create --base main --head dev/0.1.0 --title "release: v0.1.0"
+# 1. 门禁：CI 绿、无 severity: critical/major 的 issue、CHANGELOG 有这一段、version.txt 对齐
+scripts/release-preflight.sh --version 0.1.0
 
-# 合并后打 tag（在 main 上）
+# 2. release PR（feature PR 用 squash，这一层用 merge commit 保留迭代边界）
+gh pr create --base main --head dev/0.1.0 --title "release: 0.1.0"
+
+# 3. 合并后打 tag（在 main 上），tag 会触发 release.yml（校验 + 构建 + 发布 GitHub Release）
 git checkout main && git pull
 git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+
+# 4. 冻结旧版本、开新窗口
+echo "dev/0.1.0" >> .github/frozen-branches.txt   # 经 PR 提交到 main
+git switch -c dev/0.2.0                            # 从 main 切
 ```
 
-发布后从 `main` 切出下一个版本的迭代分支，例如 `dev/0.2.0`。
+> 🔒 **打了 tag 之后，`dev/0.1.0` 只读。** 任何新 feat/fix 都开新版本，不再碰已发布的分支和 tag。
+> CI 的 `policy · frozen release branches` 会让目标为冻结分支的 PR 直接失败。
 
 ---
 
@@ -109,11 +118,15 @@ git checkout dev/<下一个版本> && git merge main && git push
 
 ## 6. 迭代节奏
 
-- **两周一个迭代**，对应一条 `dev/<version>` 分支
+- **一周一个版本**（每周五 18:00 发），对应一条 `dev/<version>` 分支；`0.x` 期间每次升 MINOR
 - 迭代开始：从 `main` 切出 `dev/<version>`，把该迭代的任务拆成 `feature/*` / `bugfix/*`
 - 迭代中：只往 `dev/<version>` 合并，不碰 `main`
 - 迭代结束：`dev/<version>` → `main` 的 release PR + tag + 发布说明
 - 与既有节奏对齐：周五周报写迭代进度，月末月报对齐 OKR 的 KR 达成率
+- 这一周没有值得发的东西就**跳过**，并在下一版发布说明里写明“<日期> 未发版”——不凑数
+
+发布门禁（**有已知重大缺陷就不发**）见 [versioning.md](versioning.md) §4；机械可查的部分由
+`scripts/release-preflight.sh` 执行。
 
 ### 迭代的完成定义（DoD）
 

@@ -12,6 +12,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── 冻结分支门禁 ──────────────────────────────────────────────
+  # 已打 tag 的版本分支只读（docs/en/versioning.md §3）。这条 job 让任何
+  # 目标为冻结分支的 PR 直接失败，而不是靠“记得别改”。
+  policy:
+    name: policy · frozen release branches
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject PRs targeting a frozen release branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          f=.github/frozen-branches.txt
+          [ -f "$f" ] || { echo "no frozen list"; exit 0; }
+          frozen=$(grep -vE '^[[:space:]]*(#|$)' "$f" | tr -d '[:space:]' || true)
+          if printf '%s\n' "$frozen" | grep -Fxq "$BASE_REF"; then
+            echo "::error::$BASE_REF is frozen — version $BASE_REF was released. Open a new version branch instead (see docs/en/versioning.md)."
+            exit 1
+          fi
+          echo "base $BASE_REF is not frozen ✔"
+
   # ── 编译 + 单元测试 + 覆盖率门禁 ───────────────────────────────
   # `./gradlew build` 会跑 check → test，并在 :yb-server 上执行
   # koverVerify（分支覆盖率 ≥ 50%，按聚合测量，见 yb-server/build.gradle.kts）

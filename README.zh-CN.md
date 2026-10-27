@@ -478,7 +478,7 @@ MySQL 的「分区」与本系统的「分片」天然对齐：`PARTITION BY HAS
 
 欢迎贡献。先看 [CONTRIBUTING.md](docs/zh/CONTRIBUTING.md)——里面写了怎么构建、测试的期望，以及几条不可谈判的项目规则（请求数预算、对象不可变、`.idx`/`.dat` 分离）。所有参与者都要遵守[行为准则](docs/zh/CODE_OF_CONDUCT.md)。
 
-分支模型：`feature/*`、`bugfix/*` 从 `dev/<version>` 切出、squash 合回；`main` 只在发版时更新。详见 [开发流程](docs/zh/development-process.md)。
+分支模型：`feature/*`、`bugfix/*` 从 `dev/<version>` 切出、squash 合回；`main` 只在发版时更新。**已打 tag 的版本分支冻结、不再接受任何提交，新改动一律开新版本**；每周五发一个版本。版本号语义、冻结规则与发布门禁（有已知重大缺陷就不发）见 [版本号与发布策略](docs/zh/versioning.md)，分支操作细节见 [开发流程](docs/zh/development-process.md)。
 
 ---
 
