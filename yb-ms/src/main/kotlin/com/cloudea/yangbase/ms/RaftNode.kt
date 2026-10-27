@@ -530,9 +530,46 @@ class RaftNode(
             votedFor = null
             persistHardState()
         }
+        demoteLocked(newTerm)
+    }
+
+    /**
+     * 从领导者变回跟随者时**必须**做的三件事（调用方必须已持 [mutex]）。
+     *
+     * 这是 issue #5（CI flaky，“提交超时 5000ms：多数派未能确认日志 2”）的真身：
+     * 领导者受理了一笔写入、还没复制给多数派就因别的原因下台了；新领导者的日志里
+     * 没有这一条，它会直接覆盖那个下标——旧等待者永远等不到唤醒，挂满整个提交预算
+     * 才报「多数派未能确认」。**集群是健康的，真正发生的事是“换人了”**，
+     * 而错误信息把人指向网络与共识。
+     *
+     * 所以“下台”这动作必须包含：取消心跳（不再对外代表本任期）、
+     * 把未确认的等待者当场失败掉（带上如实的原因），而不是靠超时兜底。
+     *
+     * 语义上要说清两件事：① 这笔写入**结果未知**（可能已被多数派复制并提交，
+     * 只是本节点没来得及得知）；② 所以它是**可重试**的——MS 的写请求全是
+     * "分配/抬水位"这一类，重试最多浪费一段号段或抬一次 epoch，不会重复生效。
+     * 用 `NotLeader` 表达是不诚实的（那是“我没做”），所以用带说明的 `Error`。
+     */
+    private fun demoteLocked(term: Long) {
+        val wasLeader = role == Role.LEADER
         role = Role.FOLLOWER
+        if (!wasLeader) return
         heartbeatJob?.cancel()
         heartbeatJob = null
+        failPending("领导者已变更（任期 $term）：本节点未确认的请求结果未知，请重试", term)
+    }
+
+    /**
+     * 把当前所有等待者以同一个错误唤醒并清空。
+     *
+     * 只在下台时调用：**已提交的条目在下台前就已经 `complete` 了**
+     * （`applyCommittedLocked` 与 `stepDown` 都在同一把锁下），所以这里清掉的
+     * 一定都是"没等到确认"的。
+     */
+    private fun failPending(message: String, term: Long) {
+        if (pending.isEmpty()) return
+        val err = MetaResponse.Error(term, message)
+        for (key in pending.keys.toList()) pending.remove(key)?.complete(err)
     }
 
     private suspend fun heartbeatLoop(term: Long) {
@@ -769,7 +806,13 @@ class RaftNode(
         replicate(entry.term)
         val result = withTimeoutOrNull(commitTimeoutMillis) { waiter.await() }
         pending.remove(entry.index)
-        return result ?: MetaResponse.Error(entry.term, "提交超时（${commitTimeoutMillis}ms）：多数派未能确认日志 ${entry.index}")
+        // 注意：如果期间下过台，`stepDown` 已经把等待者当场完成掉了（带着
+        // “领导者已变更”的说明），所以这里拿到的**不是**超时——只有集群一直
+        // 健康但多数派真的凑不齐时，才会走到这条超时分支
+        return result ?: MetaResponse.Error(
+            entry.term,
+            "提交超时（${commitTimeoutMillis}ms）：多数派未能确认日志 ${entry.index}",
+        )
     }
 
     /** 等到"本任期的第一条日志已提交"为止。见 [leaderReadyTerm] 的说明。 */
@@ -831,7 +874,9 @@ class RaftNode(
             if (m.term > currentTerm) {
                 currentTerm = m.term
                 votedFor = null
-                role = Role.FOLLOWER
+                // 选举请求来自更高任期 ⇒ 本节点（若是领导者）当场下台，
+                // 未确认的写入必须立刻失败（否则要挂满整个提交预算才知道换人了）
+                demoteLocked(m.term)
                 needPersist = true
             }
             // "日志至少一样新"：候选人的日志更旧就不投它——否则已提交的条目可能被覆盖
@@ -864,7 +909,11 @@ class RaftNode(
                 persistHardState()
             }
             // 收到领导者的心跳：承认它，并重置选举计时器
-            role = Role.FOLLOWER
+            //
+            // ★ 这里曾经直接 `role = Role.FOLLOWER`，于是「领导者收到更高任期的
+            // AppendEntries」这条最常见的换人路径**不算下台**：心跳不停、
+            // 未确认的写入一直挂到提交超时。issue #5 的 flaky 就长这个样子
+            demoteLocked(m.term)
             leaderId = m.leaderId
             markHeartbeat()
             if (m.prevLogIndex > 0) {
@@ -926,7 +975,7 @@ class RaftNode(
         store.put(snapshotKey(), m.snapshot)
         mutex.withLock {
             if (m.term > currentTerm) { currentTerm = m.term; votedFor = null; persistHardState() }
-            role = Role.FOLLOWER
+            demoteLocked(m.term)
             leaderId = m.leaderId
             markHeartbeat()
             snapshotLastIndex = snap.lastIncludedIndex
