@@ -16,6 +16,30 @@ Nothing yet. The next release window opens after `v0.1.0` is tagged.
 
 ## [0.1.0] - 2026-10-30
 
+> **YangBase —— 完全构建在对象存储上的 MySQL 兼容 TP 数据库。**
+> CN 无状态、可随时销毁重建，对象存储是唯一真相源；没有写入就没有固定费用。
+>
+> **60 秒跑起来**（镜像 + 一个 S3 兼容后端，`--wait` 只在真的能接 MySQL 连接时才返回）：
+>
+> ```bash
+> docker compose up -d --wait
+> mysql -h 127.0.0.1 -P 3306 -uroot
+> ```
+>
+> **这一版包含**：LSM + 组提交 WAL + MVCC 快照隔离 + 跨分片两阶段提交；分区 / 分片；
+> 二级 / 唯一 / 复合 / 跳数（minmax·set·bloom·ngram）/ 全文索引；窗口函数、子查询、`UNION`、
+> `JSON` 函数族、定点 `DECIMAL`；对象存储上零固定成本的三种协调模式（`single` / `objectstore` / `ms`）；
+> `AS OF TIMESTAMP` / PITR / 备份恢复；CDC；在线 `ALTER TABLE`；`EXPLAIN` + 成本模型；
+> 以及运维不依赖 CN 的 `yb-cli`。
+>
+> **上车前必须知道的三件事**：
+> ① 没有认证 / 权限 / TLS（本财年明确不做）——**只能放在可信网络内**；
+> ② 阿里云 OSS 没有 ETag CAS ⇒ 指针切换不原子，必须显式开降级开关，且不能用 `objectstore` 协调模式；
+> ③ 多 CN 下**写必须打到属主 CN**：报 `1205`（可重试）并带出属主节点 / epoch / 剩余租期，
+> `yb-cli shards --owner` 可查当前属主；服务端不转发（计划见 #31）。
+>
+> 完整的已知问题见本节末尾的 `Known issues` ——**没有 Known issues 段的发布说明是在假装自己没有缺陷**。
+
 First public release. Everything below has been exercised against a real MySQL client (MySQL
 Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibaba Cloud OSS.
 
@@ -131,6 +155,8 @@ Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibab
 - **Alibaba Cloud OSS has no ETag CAS**, so the manifest pointer switch is not atomic there; it
   requires the explicit `--i-accept-nonatomic-pointer-switch` downgrade, and the `objectstore`
   coordination mode cannot be used.
-- **Writes to a non-owning CN are rejected rather than forwarded** — the error does not yet name
-  the owner (#14).
+- **Writes to a non-owning CN are rejected rather than forwarded.** The error names the owning
+  node, its epoch and the remaining lease TTL, and reports `1205` (retryable), and
+  `yb-cli shards --owner` answers "who owns this shard right now"; there is still no server-side
+  forwarding, so clients and gateways must route writes themselves (#31).
 - **Storage tiers / lifecycle rules are not implemented.**

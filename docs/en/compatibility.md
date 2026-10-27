@@ -600,6 +600,7 @@ no optimization can remove it. Therefore SLOs must be stated in two columns: "ca
 | Storage tiering and lifecycle rules | cold data cannot sink automatically | **decided not to do it in the short term (the coming months)**; see the note below. The design doc also warns that archival tiers are almost always a loss |
 | Cross-region read replicas | a single-region failure means unavailability | relies on object storage's own cross-region replication (CRR) |
 | Cross-database JOIN / cross-database transactions | behaviour is undefined | a design gap (§16.3) |
+| No server-side forwarding of shard writes | in a multi-CN deployment the client or gateway has to route writes by shard itself | deliberate: one extra hop would double commit latency and give back the "one writer per shard" simplicity. A write sent to a non-owning CN reports `1205` (retryable) with the **owner node, epoch and remaining lease TTL**; `yb-cli shards --owner` answers who owns a shard. Forwarding is planned in #31 |
 | `GEOMETRY` and spatial functions | not implemented | spatial indexes are out of design scope (§8 has no such indexes) |
 
 ### On Storage Tiering: Not in the Short Term (Decision Record)
