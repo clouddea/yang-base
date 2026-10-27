@@ -1,0 +1,93 @@
+:root {
+  --fg: #1f2328;
+  --muted: #59636e;
+  --line: #d1d9e0;
+  --accent: #0b6bcb;
+  --code-bg: #f6f8fa;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  color: var(--fg);
+  background: #fff;
+  font: 16px/1.65 -apple-system, "Segoe UI", "Noto Sans SC", "PingFang SC", Helvetica, Arial, sans-serif;
+}
+
+.site-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(4px);
+}
+
+.brand { font-weight: 700; font-size: 1.15rem; color: var(--fg); text-decoration: none; }
+
+.site-header nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+.site-header nav a { color: var(--muted); text-decoration: none; font-size: 0.94rem; }
+.site-header nav a:hover { color: var(--accent); }
+
+.content {
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+}
+
+h1, h2, h3 { line-height: 1.25; margin-top: 2rem; }
+h1 { font-size: 1.9rem; }
+h2 { font-size: 1.4rem; border-bottom: 1px solid var(--line); padding-bottom: 0.3rem; }
+
+a { color: var(--accent); }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--code-bg);
+  padding: 0.12em 0.35em;
+  border-radius: 4px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem;
+  overflow-x: auto;
+}
+pre code { background: none; padding: 0; font-size: 0.88em; }
+
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.94rem; }
+th, td { border: 1px solid var(--line); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; }
+
+blockquote {
+  margin: 1.2rem 0;
+  padding: 0.1rem 1rem;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+
+.site-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+@media (max-width: 600px) {
+  .content { padding: 1.5rem 1rem 3rem; }
+  h1 { font-size: 1.5rem; }
+}

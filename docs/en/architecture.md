@@ -1,3 +1,6 @@
+---
+---
+
 # Architecture Overview
 
 [English](architecture.md) | [简体中文](../zh/yangbase-design.md)

@@ -1,3 +1,6 @@
+---
+---
+
 # 版本号与发布策略
 
 [English](../en/versioning.md) | [简体中文](versioning.md)
@@ -61,7 +64,7 @@ main  ──●──────────────●──────�
 
 **`vX.Y.Z` 一旦打上，版本 `X.Y.Z` 就关闭了。不允许再有任何提交。**
 
-- `dev/X.Y.Z` **冻结**、只读。它会写进 [`.github/frozen-branches.txt`](../../.github/frozen-branches.txt)，
+- `dev/X.Y.Z` **冻结**、只读。它会写进 [`.github/frozen-branches.txt`](https://github.com/clouddea/yang-base/blob/main/.github/frozen-branches.txt)，
   CI 对**目标为冻结分支的 PR 一律失败**。分支保留 90 天供追溯，然后删除。
 - tag 受保护：不可移动、不可删除（仓库 ruleset `protect-release-tags`）。
 - 新功能、新修复**绝不**落在已发布的版本上。要开新版本：fix → 下一个 PATCH（`dev/X.Y.(Z+1)`），

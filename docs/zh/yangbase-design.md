@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase 设计文档
 
 **一个完全构建在对象存储之上的分布式 TP 数据库**
@@ -2682,7 +2685,7 @@ class CountingObjectStore(private val delegate: ObjectStore) : ObjectStore {
 
 > ⚠️ **本表是目标态（设计时的选型意图），不是实现现状。**
 > 实现实际用到的依赖、以及每一处偏离的理由，列在
-> [PROJECT_GUIDE.md 的「与设计文档的偏离清单（§15 技术栈）」](../../PROJECT_GUIDE.md)。
+> [PROJECT_GUIDE.md 的「与设计文档的偏离清单（§15 技术栈）」](https://github.com/clouddea/yang-base/blob/main/PROJECT_GUIDE.md)。
 > 读本表时请对照那份清单——下面这张表里有好几行（ANTLR4、gRPC + Protobuf、
 > Caffeine、RocksDB JNI、RoaringBitmap、zstd、jieba、Micrometer、Kotest、
 > Testcontainers、JMH）**最终没有引入**，其中有的是刻意换掉（为了少一份依赖
@@ -2707,7 +2710,7 @@ class CountingObjectStore(private val delegate: ObjectStore) : ObjectStore {
 > **关于中文分词的现状**：实现里只有 `standard` 与 `ngram` 两个分析器
 > （`Analyzer.kt`；`WITH PARSER ngram` 走的是 CJK 二元切分的兜底模式，
 > 正是 §8.6.4 写的那条兜底路径）。**没有**引入 jieba / HanLP——理由与
-> [Analyzer.kt](../../yb-index/src/main/kotlin/com/cloudea/yangbase/index/fulltext/Analyzer.kt)
+> [Analyzer.kt](https://github.com/clouddea/yang-base/blob/main/yb-index/src/main/kotlin/com/cloudea/yangbase/index/fulltext/Analyzer.kt)
 > 的注释一致：不为分词引入外部依赖与词典体积，`FullTextIndex` 只依赖 `Analyzer` 接口，
 > 需要真正的分词时实现该接口即可替换。
 
@@ -2765,7 +2768,7 @@ yang-base/
 > 上面树里的 `yb-proto`（本来就是为了放 Protobuf/gRPC 定义而存在的）根本不存在——
 > MS 的 RPC 是手写长度前缀 JSON（§15.2）；`yb-objectstore-api` / `-s3` / `-fs` 合并成了 `yb-objectstore`，
 > `yb-index-*` 合并成了 `yb-index`，`yb-sql-parser` / `-planner` / `-exec` 合并成了 `yb-sql`。
-> 模块划分的调整理由与现状列在 [PROJECT_GUIDE.md](../../PROJECT_GUIDE.md)。
+> 模块划分的调整理由与现状列在 [PROJECT_GUIDE.md](https://github.com/clouddea/yang-base/blob/main/PROJECT_GUIDE.md)。
 
 ---
 

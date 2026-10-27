@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase Compatibility and Limitations
 
 [English](compatibility.md) | [简体中文](../zh/compatibility.md)
@@ -569,7 +572,7 @@ A server treating it as default behaviour would be closing that gate on the clie
 > In the table above, **only the last column, "request count", is deterministic** — latency and throughput depend heavily on the environment; switching to real
 > object storage only changes latency (about 4 ms per PUT; on the cloud, another order of magnitude higher) and **never changes request counts**:
 > point lookups at 0.004 requests, `COUNT(*)` at 0, and 14.5× group-commit amortization are architectural properties. For the full backend comparison, see
-> the "Performance (measured)" section of [README](../../README.md).
+> the "Performance (measured)" section of [README](https://github.com/clouddea/yang-base/blob/main/README.md).
 
 **The hot/cold difference is a few tens of times**, which is a physical lower bound of object storage as a data layer;
 no optimization can remove it. Therefore SLOs must be stated in two columns: "cache hit" and "cache miss"

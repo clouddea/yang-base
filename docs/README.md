@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase Documentation
 
 [English](en/README.md) | [简体中文](zh/README.md)
@@ -19,7 +22,7 @@ All documentation is maintained in two languages:
 - **Want to know how it works?** → [Architecture Overview](en/architecture.md)
 - **Migrating an existing MySQL app?** → [Compatibility and Limitations](en/compatibility.md)
 - **Choosing or verifying an object store?** → [Object Storage Backends](en/backends.md)
-- **Want to contribute?** → [CONTRIBUTING.md](../CONTRIBUTING.md), [Versioning & release policy](en/versioning.md), and [Development process](zh/development-process.md) (Chinese)
+- **Want to contribute?** → [CONTRIBUTING.md](https://github.com/clouddea/yang-base/blob/main/CONTRIBUTING.md), [Versioning & release policy](en/versioning.md), and [Development process](zh/development-process.md) (Chinese)
 
 ## Documentation status
 
@@ -35,4 +38,4 @@ All documentation is maintained in two languages:
 | Code review regression list | — | ✅ [code-review-2026-09.md](zh/code-review-2026-09.md) |
 | SQL test manual | — | ✅ [sql-manual/](sql-manual/CASES.md) |
 
-Rows marked `—` are Chinese-only for now; English versions are being written. See the roadmap in [PROJECT_GUIDE.md](../PROJECT_GUIDE.md).
+Rows marked `—` are Chinese-only for now; English versions are being written. See the roadmap in [PROJECT_GUIDE.md](https://github.com/clouddea/yang-base/blob/main/PROJECT_GUIDE.md).
