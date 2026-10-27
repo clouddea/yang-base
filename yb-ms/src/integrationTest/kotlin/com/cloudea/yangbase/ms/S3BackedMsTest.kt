@@ -89,8 +89,13 @@ class S3BackedMsTest {
         val cluster = InProcessMetaCluster.start(
             3, store, scope,
             // 真实后端上一次追加就是一次真实 PUT（几十毫秒）：超时太小会让集群
-            // 在负载下反复换领导者（§4.4 的实测教训），所以这里跟着放大
-            electionTimeoutMillis = if (externalEndpoint != null) 1_500L..3_000L else 300L..600L,
+            // 在负载下反复换领导者（§4.4 的实测教训），所以这里跟着放大。
+            //
+            // 内嵌 S3 也算"真实后端"：它走的是真 HTTP。CI 的 2 核 runner 上，
+            // 300–600ms 的选举超时**低于噪声底盘**（GC + Gradle + 两个 JVM + HTTP），
+            // 于是这个用例偶发变成"测选举"，而不是它要测的"日志落在 S3 上"。
+            // 选举敏捷性有专门的用例（`RaftHighLatencyElectionTest`），不靠这里守。
+            electionTimeoutMillis = 1_500L..3_000L,
             // 提交预算显式放大到 5s（默认推导值在这里只有 300ms）：CI 的 2 核 runner 上
             // S3 落盘路径（HTTP + 本地内嵌 S3）会被 CPU 争抢拉到几百毫秒，
             // 300ms 内凑不齐多数派确认，表现为「提交超时（300ms）」。
