@@ -144,6 +144,11 @@ git tag -a v0.2.0 -m "YangBase 0.2.0" && git push origin v0.2.0
 #   → release.yml: verify tag == version.txt, run build + integrationTest,
 #     publish the GitHub Release with the CHANGELOG section, upload the distributions
 
+# ── same day: point the docs site at the released tree, not at a dev branch ──
+gh api -X PUT repos/clouddea/yang-base/pages -f "source[branch]=main" -f "source[path]=/docs"
+#   → the published site must be built from released content; leaving the source on
+#     dev/X.Y.Z would publish unreleased (possibly broken) docs under the public URL
+
 # ── immediately after: freeze and open the next window ──
 echo "dev/0.2.0" >> .github/frozen-branches.txt     # commit on main via PR
 git switch main && git switch -c dev/0.3.0          # next MINOR window opens

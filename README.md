@@ -3,6 +3,7 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 [![CI](https://github.com/clouddea/yang-base/actions/workflows/ci.yml/badge.svg)](https://github.com/clouddea/yang-base/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-clouddea.github.io%2Fyang--base-0b6bcb.svg)](https://clouddea.github.io/yang-base/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![JDK](https://img.shields.io/badge/JDK-21-orange.svg)](https://adoptium.net/)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1-7F52FF.svg)](https://kotlinlang.org/)
