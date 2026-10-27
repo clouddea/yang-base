@@ -302,6 +302,7 @@ enum class StoreOp(val wire: String) {
     PUT("put"),
     PUT_CONDITIONAL("put_cond"),
     DELETE("delete"),
+    DELETE_BATCH("delete_batch"),
     LIST("list"),
     HEAD("head"),
 }

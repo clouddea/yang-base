@@ -66,6 +66,10 @@ Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibab
 - **`commit_mode=async`**: acknowledges after the PUT is *issued*, with an ordered background
   upload pipeline, unbounded retry (no acknowledged write is ever dropped), bounded in-flight window
   (RPO ceiling = 64 batches), and metrics that state the window explicitly.
+- **Batch delete** (`DeleteObjects`, 1000 keys per request) in the `ObjectStore` SPI: a bucket cleanup
+  that used to cost `2N` requests (a `HEAD` plus a `DELETE` per key) now costs `ceil(N/1000)`.
+  Alibaba Cloud OSS requires `Content-MD5` on that call and rejects it with a bare
+  "Missing Some Required Arguments" otherwise, so the adapter computes it; verified against real OSS.
 - Apache-2.0 license, CI (build + coverage gate + integration + real-OSS nightly), issue/PR
   templates, security policy, English README, bilingual docs (`docs/en`, `docs/zh`).
 
@@ -117,5 +121,3 @@ Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibab
 - **Writes to a non-owning CN are rejected rather than forwarded** — the error does not yet name
   the owner (#14).
 - **Storage tiers / lifecycle rules are not implemented.**
-- **Bucket cleanup still costs 2 requests per object**: S3 batch delete (`DeleteObjects`,
-  1000 keys per call) is not wired in yet.

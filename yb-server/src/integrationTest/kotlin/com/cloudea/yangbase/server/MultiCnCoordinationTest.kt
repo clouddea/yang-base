@@ -143,10 +143,15 @@ class MultiCnCoordinationTest {
     }
 
     /** 清空桶。真实对象存储会跨运行保留数据，必须显式清理（与 `S3IntegrationTest` 同一做法）。 */
-    private fun wipe(target: ObjectStore) = runBlocking {
+    private fun wipe(target: ObjectStore) = runBlocking<Unit> {
         val keys = target.listAll("")
         if (keys.isNotEmpty()) println("[MultiCnCoordinationTest] 清理上次残留的 ${keys.size} 个对象")
-        for (k in keys) runCatching { target.delete(k) }
+        if (keys.isNotEmpty()) {
+            runCatching { target.deleteBatch(keys) }.onFailure { e ->
+                println("[MultiCnCoordinationTest] 批量删除失败，退回逐个删：${e.message}")
+                keys.forEach { runCatching { target.delete(it) } }
+            }
+        }
     }
 
     /**

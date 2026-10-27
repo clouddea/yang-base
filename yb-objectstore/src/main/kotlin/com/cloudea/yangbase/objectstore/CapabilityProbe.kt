@@ -283,7 +283,37 @@ object CapabilityProbe {
         // 没有整对象复制的调用点）记在 docs/zh/yangbase-design.md §3.2 的决策记录里。
 
         // ── 清理 ──────────────────────────────────────────────────
-        runCatching { store.listAll(probePrefix).forEach { store.delete(it) } }
+        // ── 7. 批量删除 ────────────────────────────────────────────
+        // 能测的**只有语义**（键真的没了），测不到“是否真的一次请求删多个”——
+        // 那要靠请求计数，而通用 ObjectStore 看不到请求。分工：
+        //   · 这里：声明了批量删除却删不干净 → 启动时就降级并报出来
+        //   · conformance 套件：用 CountingObjectStore 断言实际请求数
+        var batchOk = true
+        var batchDetail = "后端未声明批量删除（N 个键 = N 次请求）"
+        val declaredBatch = store.caps.batchDeleteMaxKeys
+        if (declaredBatch > 0 && basicOk) {
+            try {
+                val bk = (1..3).map { "$probePrefix/bd/$it" }
+                bk.forEach { store.put(it, "x".toByteArray()) }
+                // 多带一个不存在的键：原生批量 API 对它的容忍度是各家实现差异最大的地方
+                store.deleteBatch(bk + "$probePrefix/bd/missing")
+                val left = bk.filter { runCatching { store.head(it) }.isSuccess }
+                batchOk = left.isEmpty()
+                batchDetail = if (batchOk) {
+                    "声明批量删除（maxKeys=$declaredBatch）且真的删掉了"
+                } else {
+                    "声明了批量删除，但删完还有 ${left.size} 个键（如 ${left.first()}）——" +
+                        "这种后端上 GC / DROP TABLE 会永久残留对象"
+                }
+            } catch (e: Exception) {
+                batchOk = false
+                batchDetail = "声明了批量删除，但调用失败：${why(e)}"
+            }
+        }
+        findings += Finding("批量删除", batchOk, batchDetail, critical = false)
+
+        // 清理：用批量删除（探测真的走到了批量路径，而不是每个键两次请求）
+        runCatching { store.deleteBatch(store.listAll(probePrefix)) }
 
         val caps = ObjectStoreCapabilities(
             conditionalCreate = condCreate,
@@ -295,6 +325,9 @@ object CapabilityProbe {
             lowLatencyTierSupportsConditionalWrite = false,
             // ★ 这一项现在是真的测出来的，不是抄文档
             conditionalWriteVerified = condCreate && condUpdate,
+            // 声明式能力：探测只能验语义，请求数由 conformance 套件断言；
+            // 探测失败（声明了却删不干净）就地降级成 0，退回到逐个删
+            batchDeleteMaxKeys = if (batchOk) declaredBatch else 0,
         )
         return Result(caps, findings, System.currentTimeMillis() - started)
     }
@@ -309,6 +342,8 @@ object CapabilityProbe {
                 strongReadAfterWrite = declared.strongReadAfterWrite && r.capabilities.strongReadAfterWrite,
                 strongListConsistency = declared.strongListConsistency && r.capabilities.strongListConsistency,
                 conditionalWriteVerified = r.capabilities.conditionalWriteVerified,
+                // 探测发现「声明了批量删除却删不干净」时降成 0（= 逐个删）
+                batchDeleteMaxKeys = if (r.capabilities.batchDeleteMaxKeys > 0) declared.batchDeleteMaxKeys else 0,
             )
         )
     }

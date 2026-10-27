@@ -47,7 +47,7 @@ yb-server --s3-provider minio --s3-endpoint http://127.0.0.1:9000 \
 |---|---|---|---|---|---|
 | `aws`（默认） | SDK 内置 | `us-east-1` | 自动 | 标准 S3 全能力 | ✅ |
 | `minio` | 必须显式给 | `us-east-1` | 路径式 | 标准 S3 全能力 | ✅ |
-| `oss` | `https://oss-{region}.aliyuncs.com` | `cn-hangzhou` | 三级域名 | **无 ETag CAS**、`FORBID_OVERWRITE` | ✅ 真实服务 |
+| `oss` | `https://oss-{region}.aliyuncs.com` | `cn-hangzhou` | 三级域名 | **无 ETag CAS**、`FORBID_OVERWRITE`、批量删除需 `Content-MD5`（适配层已补） | ✅ 真实服务 |
 | `cos` | `https://cos.{region}.myqcloud.com` | `ap-guangzhou` | 三级域名 | 标准 S3（假设） | ❌ 未实测 |
 | `obs` | `https://obs.{region}.myhuaweicloud.com` | `cn-north-4` | 三级域名 | 标准 S3（假设） | ❌ 未实测 |
 | `r2` | 必须显式给（`https://<account>.r2.cloudflarestorage.com`） | `auto` | 路径式 | 标准 S3（假设） | ❌ 未实测 |
@@ -93,8 +93,14 @@ data class ObjectStoreCapabilities(
     val requestsAreBilled: Boolean,
     val serverSideCopy: Boolean,
     val eventNotification: Boolean,
+    val batchDeleteMaxKeys: Int,                // 0 = 没有原生批量删除（N 个键 = N 次请求）
 )
 ```
+
+`batchDeleteMaxKeys` 是唯一一个**只影响成本、不影响正确性**的能力位，但它决定了 GC、`DROP TABLE`
+和恢复清理在真实对象存储上能不能跑完：清桶快照动辄上万键，逐个删就是上万次计费请求（还要乘 2，
+因为每条都先 HEAD）。声明了它的后端必须用一次请求删多个键（S3/OSS 的 `DeleteObjects`，上限 1000），
+请求数从 `2N` 降到 `ceil(N/1000)`。默认实现是逐个删，所以没声明的后端只是慢，不会错。
 
 由此有两条**硬规则**（违反它们算 bug，不算风格问题）：
 

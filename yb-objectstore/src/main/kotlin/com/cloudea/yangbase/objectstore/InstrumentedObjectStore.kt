@@ -76,6 +76,20 @@ class InstrumentedObjectStore(private val delegate: ObjectStore) : ObjectStore {
         }
     }
 
+    override suspend fun deleteBatch(keys: Collection<String>): Int {
+        val t0 = System.nanoTime()
+        try {
+            val n = delegate.deleteBatch(keys)
+            // 延迟按一次调用记（那是用户等的时间），请求数由各后端自己的分页决定；
+            // 需要请求数口径的断言请用 CountingObjectStore
+            Metrics.onStoreRequest(StoreOp.DELETE_BATCH, nanos = System.nanoTime() - t0)
+            return n
+        } catch (t: Throwable) {
+            recordError(t)
+            throw t
+        }
+    }
+
     override suspend fun list(prefix: String, pageToken: String?, limit: Int): ListPage {
         val t0 = System.nanoTime()
         try {

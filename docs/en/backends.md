@@ -47,7 +47,7 @@ yb-server --s3-provider minio --s3-endpoint http://127.0.0.1:9000 \
 |---|---|---|---|---|---|
 | `aws` (default) | SDK-resolved | `us-east-1` | auto | full S3 | ✅ |
 | `minio` | must be given | `us-east-1` | path | full S3 | ✅ |
-| `oss` | `https://oss-{region}.aliyuncs.com` | `cn-hangzhou` | virtual-host | **no ETag CAS**, `FORBID_OVERWRITE` | ✅ on the real service |
+| `oss` | `https://oss-{region}.aliyuncs.com` | `cn-hangzhou` | virtual-host | **no ETag CAS**, `FORBID_OVERWRITE`, batch delete needs `Content-MD5` (added by the adapter) | ✅ on the real service |
 | `cos` | `https://cos.{region}.myqcloud.com` | `ap-guangzhou` | virtual-host | full S3 (assumed) | ❌ not yet |
 | `obs` | `https://obs.{region}.myhuaweicloud.com` | `cn-north-4` | virtual-host | full S3 (assumed) | ❌ not yet |
 | `r2` | must be given (`https://<account>.r2.cloudflarestorage.com`) | `auto` | path | full S3 (assumed) | ❌ not yet |
@@ -93,8 +93,17 @@ data class ObjectStoreCapabilities(
     val requestsAreBilled: Boolean,
     val serverSideCopy: Boolean,
     val eventNotification: Boolean,
+    val batchDeleteMaxKeys: Int,                // 0 = no native batch delete (N keys = N requests)
 )
 ```
+
+`batchDeleteMaxKeys` is the one capability that affects **cost only**, never correctness — and yet it
+decides whether GC, `DROP TABLE` and recovery cleanup can finish on real object storage at all:
+a snapshot ready for deletion holds tens of thousands of keys, and deleting them one at a time is one
+billed request each (two, in fact, since every `delete` does a `HEAD` first). A backend that declares
+it must delete many keys per request (`DeleteObjects`, 1000 max on S3/OSS), taking the cost from `2N`
+to `ceil(N/1000)`. The default implementation deletes one by one, so an undeclared backend is only
+slower, never wrong.
 
 Two rules follow from this, and both are enforced as bugs, not conventions:
 

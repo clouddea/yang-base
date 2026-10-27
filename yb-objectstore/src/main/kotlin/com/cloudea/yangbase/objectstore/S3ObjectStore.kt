@@ -19,6 +19,9 @@ import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.s3.S3Client
 import software.amazon.awssdk.services.s3.S3Configuration
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest
+import software.amazon.awssdk.services.s3.model.Delete
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier
 import software.amazon.awssdk.services.s3.model.GetObjectRequest
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest
 import software.amazon.awssdk.services.s3.model.CompletedPart
@@ -216,6 +219,73 @@ class S3ObjectStore(
         true
     }
 
+    /**
+     * 批量删除（`POST /?delete`，`DeleteObjects`）：一次最多
+     * [ObjectStoreCapabilities.batchDeleteMaxKeys] 个键。
+     *
+     * 清桶路径的请求数因此从 `2N`（每个键一次 HEAD + 一次 DELETE）降到
+     * `ceil(N/maxKeys)`。这直接决定 `io-budget` 那片集成测试在真实对象存储上
+     * 是几分钟还是半小时——实测过一次真实 OSS 上单片 23 分钟，全部花在清桶上。
+     *
+     * ⚠️ 响应里的 `Errors` **不能吞掉**：S3 的批量删除是「部分成功」语义，
+     * HTTP 200 也可能带着一半失败。只看状态码会让 GC 以为都删了，
+     * 而对象还在——空间不回收、下一次又删一遍，而且没有任何错误可查。
+     */
+    override suspend fun deleteBatch(keys: Collection<String>): Int {
+        val max = caps.batchDeleteMaxKeys
+        // 声明不支持批量删除的后端（或未来某个以 0 声明的预设）：退回到逐个删
+        if (keys.isEmpty()) return 0
+        if (max <= 0) return super.deleteBatch(keys)
+        return withContext(ioDispatcher) {
+            var deleted = 0
+            for (chunk in keys.chunked(max)) {
+                val req = DeleteObjectsRequest.builder()
+                    .bucket(bucket)
+                    .delete(
+                        Delete.builder()
+                            // quiet=false：要求回每一个成功删掉的键，否则响应里只有错误
+                            .quiet(false)
+                            .objects(chunk.map { ObjectIdentifier.builder().key(it).build() })
+                            .build(),
+                    )
+                    .build()
+                try {
+                    val resp = client.deleteObjects(req)
+                    deleted += chunk.size - resp.errors().size
+                    if (resp.errors().isNotEmpty()) {
+                        // 先给出计数与前几条明细：一次 1000 键的批量里，
+                        // “哪几个键失败”比“有几条失败”更有用，但完整列表可能很长
+                        val sample = resp.errors().take(3).joinToString("; ") {
+                            "${it.key()}: ${it.code()} ${it.message()}"
+                        }
+                        throw ObjectStoreException(
+                            "DELETE 批量失败: ${resp.errors().size}/${chunk.size} 个键未删掉（首批: $sample）",
+                            // 整批重发是安全的：DELETE 幂等，已删掉的不再存在
+                            retryable = resp.errors().all { isTransientCode(it.code()) },
+                        )
+                    }
+                } catch (e: S3Exception) {
+                    if (isNoSuchBucket(e)) noSuchBucket(chunk.first(), e)
+                    throw ObjectStoreException(
+                        "DELETE 批量失败: ${e.statusCode()} ${e.awsErrorDetails()?.errorMessage()}".trim(),
+                        e, retryable = isTransient(e),
+                    )
+                } catch (e: SdkException) {
+                    throw ObjectStoreException("DELETE 批量失败: ${e.message}", e, retryable = isTransient(e))
+                } catch (e: java.io.UncheckedIOException) {
+                    ioFailure("DELETE", "${chunk.size} 个键", e)
+                }
+            }
+            deleted
+        }
+    }
+
+    /** 批量响应的逐键错误码是不是「重发可能成功」那一类。 */
+    private fun isTransientCode(code: String?): Boolean = when (code) {
+        "InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout" -> true
+        else -> false
+    }
+
     override suspend fun list(prefix: String, pageToken: String?, limit: Int): ListPage =
         withContext(ioDispatcher) {
             val req = ListObjectsV2Request.builder()
@@ -311,6 +381,36 @@ class S3ObjectStore(
 
     companion object {
         /**
+         * 给 `DeleteObjects` 补上 `Content-MD5`。
+         *
+         * 为什么不能只靠 SDK：S3 把这个头当可选，而**阿里云 OSS 把它当必填**——
+         * 不带就是 400 `Missing Some Required Arguments`（2026-10-27 在真实桶上实测）。
+         * 于是同一个调用在 MinIO 上通过、在 OSS 上失败，而错误信息完全不提 MD5。
+         *
+         * 只作用于 `?delete` 那两个请求：其它请求 OSS 不要求，白算一遍哈希只是浪费。
+         * SigV4 不签 `Content-MD5`，所以在这里加头不会让签名失效。
+         */
+        private object ContentMd5Interceptor :
+            software.amazon.awssdk.core.interceptor.ExecutionInterceptor {
+            override fun modifyHttpRequest(
+                context: software.amazon.awssdk.core.interceptor.Context.ModifyHttpRequest,
+                executionAttributes: software.amazon.awssdk.core.interceptor.ExecutionAttributes,
+            ): software.amazon.awssdk.http.SdkHttpRequest {
+                val request = context.httpRequest()
+                val full = request as? software.amazon.awssdk.http.SdkHttpFullRequest ?: return request
+                if (!full.rawQueryParameters().containsKey("delete")) return request
+                val provider = full.contentStreamProvider().orElse(null) ?: return request
+                val body = provider.newStream().use { it.readBytes() }
+                val md5 = java.util.Base64.getEncoder()
+                    .encodeToString(java.security.MessageDigest.getInstance("MD5").digest(body))
+                return full.toBuilder()
+                    .putHeader("Content-MD5", md5)
+                    .contentStreamProvider { body.inputStream() }
+                    .build()
+            }
+        }
+
+        /**
          * 「这个失败是瞬时的吗」——即**重发一次可能成功**。
          *
          * 分类必须发生在这一层（而不是让重试层去读 message）：只有这里能同时看到
@@ -388,7 +488,14 @@ class S3ObjectStore(
             pathStyle: Boolean? = null,
         ): S3ObjectStore =
             S3ObjectStore(
-                buildClient(endpoint, region, accessKey, secretKey, pathStyle), bucket, caps, ioParallelism,
+                buildClient(
+                    endpoint, region, accessKey, secretKey, pathStyle,
+                    // OSS 风格的后端（`FORBID_OVERWRITE`）需要给批量删除补 Content-MD5。
+                    // 用原子创建风格代理这个判断而不是再加一个参数：这两条目前恰好是同一个后端，
+                    // 真有第三个需要它的后端时再拆成独立声明。
+                    contentMd5ForBatchDelete = caps.atomicCreateStyle == AtomicCreateStyle.FORBID_OVERWRITE,
+                ),
+                bucket, caps, ioParallelism,
             )
 
         private fun buildClient(
@@ -397,6 +504,7 @@ class S3ObjectStore(
             accessKey: String?,
             secretKey: String?,
             pathStyle: Boolean? = null,
+            contentMd5ForBatchDelete: Boolean = false,
         ): S3Client {
             val builder = S3Client.builder()
                 .region(Region.of(region))
@@ -426,6 +534,12 @@ class S3ObjectStore(
                 .overrideConfiguration(
                     ClientOverrideConfiguration.builder()
                         .retryPolicy(RetryPolicy.none())
+                        .apply {
+                            // 阿里云 OSS 的 DeleteMultipleObjects **强制要求 Content-MD5**，
+                            // 没有它直接 400 `Missing Some Required Arguments`（实测 2026-10-27）。
+                            // S3 协议里这只是一个可选头，SDK 不会替我们算，所以只能自己加。
+                            if (contentMd5ForBatchDelete) addExecutionInterceptor(ContentMd5Interceptor)
+                        }
                         .build()
                 )
             if (endpoint != null) builder.endpointOverride(URI.create(endpoint))
