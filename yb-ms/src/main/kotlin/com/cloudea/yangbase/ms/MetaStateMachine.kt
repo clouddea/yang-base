@@ -100,9 +100,13 @@ class MetaStateMachine(private var state: MetaState = MetaState()) {
                 // 判断用的是 `entry.issuedAt`（领导者生成命令时的毫秒）而不是本地时钟：
                 // 状态机必须是确定性的，各副本读各自的时钟会让租约表慢慢漂移
                 if (prev != null && prev.expiresAtMillis > entry.issuedAt && prev.holder != req.holder) {
+                    // 1105 → 1205：与对象存储模式的租约冲突保持**同一个错误码**。
+                    // 两种协调模式对客户端应当是同一件事（“分片写权被别人占着，稍后重试”），
+                    // 区别只在实现（CAS vs 共识），不应该泄露到错误码上——
+                    // 否则同一个应用换一种部署就要改一次重试逻辑（issue #14）
                     MetaResponse.Failure(
-                        entry.term, 1105,
-                        "分片 ${req.shard} 的写者租约被 '${prev.holder}' 持有，" +
+                        entry.term, 1205,
+                        "分片 ${req.shard} 的写者租约被 '${prev.holder}' 持有（epoch ${prev.epoch}），" +
                             "还有 ${prev.expiresAtMillis - entry.issuedAt}ms 到期。" +
                             "同一分片任一时刻只能有一个写者（§4.3）",
                     )

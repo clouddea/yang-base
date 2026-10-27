@@ -273,6 +273,47 @@ class YbCliTest {
         assertTrue(out.contains("合计行数: 200"), "应给出总行数：\n$out")
     }
 
+    /**
+     * ★ `shards --owner` 必须报得出**当前写者属主**（issue #14）。
+     *
+     * 前提得是真的：`forTesting` 默认是 `coord-mode=single`，那种部署**不开租约**、
+     * 对象存储上一个租约对象也没有。所以这里把 CN 重新装配成 `coord-mode=objectstore`
+     * （用本地目录的条件写做 CAS）——否则这条用例测的只是“表格多了一列”，
+     * 而不是“运维工具能不能真的告诉使用者该把写请求发给谁”。
+     */
+    @Test
+    fun `shards --owner 报出当前写者属主`() {
+        runCatching { server.stop() }
+        server = YangBaseServer(
+            config = ServerConfig(
+                host = "127.0.0.1", port = 0,
+                nodeId = "cn-owner-a",
+                coordMode = "objectstore",
+            ),
+            injectedStore = LocalFileObjectStore(storeDir),
+        )
+        server.start()
+        port = server.boundPort
+
+        seed()
+        val out = cli("shards", "--owner")
+        assertTrue(out.contains("属主"), "--owner 必须多出属主列：\n$out")
+        assertTrue(out.contains("cn-owner-a"), "应报出真正持有写者租约的节点：\n$out")
+        assertTrue(
+            Regex("[1-9]\\d* 个分片有活着的租约").containsMatchIn(out),
+            "汇总行应说清楚有多少分片真的持有租约：\n$out",
+        )
+    }
+
+    /** `--owner` 在**没有租约对象**的存储上要解释“为什么查不到”，而不是让人误以为“没人写”。 */
+    @Test
+    fun `shards --owner 在没有租约对象时解释原因`() {
+        seed()   // 默认 single 模式：不开租约，不会写租约对象
+        val out = cli("shards", "--owner")
+        assertTrue(out.contains("—"), "没有租约对象时列应为空：\n$out")
+        assertTrue(out.contains("coord-mode=single"), "必须解释“查不到”的原因（而不是留白）：\n$out")
+    }
+
     // ── gc ────────────────────────────────────────────────────────
 
     @Test

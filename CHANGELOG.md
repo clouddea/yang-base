@@ -107,6 +107,14 @@ Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibab
   classification above.
 - Integration tests against a real backend now go through the same L1 retry layer that production
   uses; a single TCP connect timeout to a remote region no longer shows up as a false failure.
+- **A write sent to a CN that does not own the shard reported `1105` and dropped the diagnosis**
+  (issue #14). The coordination layer already knew **who** held the lease and for how long, but
+  `ensureWriter()` swallowed the exception and re-threw a generic message — so a client had no way to
+  tell which node to send the write to, and a genuine object-storage error was misreported as "another
+  node owns this shard". It is now `1205` (`ER_LOCK_WAIT_TIMEOUT`: the shard write lease is a held
+  mutual-exclusion resource), the message names the holder, its epoch and the remaining TTL, and the
+  coordinator's own exception is no longer flattened. New: `yb-cli shards --owner` answers "which CN
+  owns this shard right now" from the lease objects (1 `GET` per shard, no CN required).
 - Design document calibrated to the implementation in 12 places (SPI count, transport, `.idx`
   ratio, commit-mode levels, request-count definition, and others) instead of leaving intent and
   reality to diverge silently.

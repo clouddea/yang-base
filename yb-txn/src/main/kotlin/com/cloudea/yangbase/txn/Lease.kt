@@ -75,6 +75,23 @@ class LeaseManager(
     private fun keyOf(shard: ShardId) = ObjectKeys.shardLease(shard)
 
     /**
+     * 租约的**只读快照**：谁持有、哪个 epoch、什么时候到期。
+     *
+     * 刻意与 [Lease] 分开：快照拿不到 CAS 凭据（etag），所以它**不能**用来续期/释放。
+     * 把它做成独立类型，是为了让「查一眼」这件事在类型上就无法被误用成「拿去改」。
+     */
+    data class LeaseSnapshot(
+        val shard: ShardId,
+        val holder: String,
+        val epoch: Long,
+        val expiresAtMillis: Long,
+    ) {
+        fun isExpired(now: Long = System.currentTimeMillis()): Boolean = now >= expiresAtMillis
+
+        fun remainingMillis(now: Long = System.currentTimeMillis()): Long = expiresAtMillis - now
+    }
+
+    /**
      * 读取当前租约。返回 null 表示从未有人持有过。
      *
      * ⚠️ 已过期的租约**仍然返回**（带原来的 epoch）——调用方需要它的 epoch
@@ -92,15 +109,41 @@ class LeaseManager(
         } catch (_: ObjectNotFoundException) {
             return null   // head 与 get 之间被删了；当作不存在，调用方会重试
         }
-        val text = String(bytes, Charsets.UTF_8)
+        val snap = snapshotOf(shard, String(bytes, Charsets.UTF_8))
         return Lease(
             shard = shard,
-            holder = Regex("\"holder\"\\s*:\\s*\"([^\"]*)\"").find(text)?.groupValues?.get(1) ?: "",
-            epoch = Regex("\"epoch\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
-            expiresAtMillis = Regex("\"expiresAt\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
+            holder = snap.holder,
+            epoch = snap.epoch,
+            expiresAtMillis = snap.expiresAtMillis,
             etag = meta.etag.value,
         )
     }
+
+    /**
+     * 只读地看一眼当前租约（运维查询用：`yb-cli shards --owner`）。
+     *
+     * 与 [current] 的区别是**只发 1 次 GET**：`current` 多一次 `head` 是为了拿 CAS 凭据，
+     * 而对「这个分片现在归谁」这个问题，凭据没有意义。请求数在这个项目里是一等成本，
+     * 一次查询 N 个分片时这一次之差就是一倍。
+     *
+     * 返回 null 表示没有租约对象：单 CN 部署（`SingleProcessLease` 根本不写对象）
+     * 或者 MS 模式（租约在共识状态里，不在对象存储上）。
+     */
+    suspend fun peek(shard: ShardId): LeaseSnapshot? {
+        val bytes = try {
+            store.get(keyOf(shard))
+        } catch (_: ObjectNotFoundException) {
+            return null
+        }
+        return snapshotOf(shard, String(bytes, Charsets.UTF_8))
+    }
+
+    private fun snapshotOf(shard: ShardId, text: String) = LeaseSnapshot(
+        shard = shard,
+        holder = Regex("\"holder\"\\s*:\\s*\"([^\"]*)\"").find(text)?.groupValues?.get(1) ?: "",
+        epoch = Regex("\"epoch\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
+        expiresAtMillis = Regex("\"expiresAt\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L,
+    )
 
     /**
      * 取得分片的写者租约。
@@ -116,9 +159,12 @@ class LeaseManager(
         while (true) {
             val cur = current(shard)
             if (cur != null && !cur.isExpired()) {
+                // ★ 错误码 1205（而不是 1105）：见 LsmStore.ensureWriter 的说明——
+                // 「资源被别人占着、稍后重试」在这个系统里是**确定可重试**的语义，
+                // 1205 让 JDBC 客户端把它映射成可重试的事务异常，1105 则是一个死胡同。
                 throw SqlException(
-                    MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
-                    "分片 $shard 的写者租约被 '${cur.holder}' 持有，" +
+                    MySqlErrors.ER_LOCK_WAIT_TIMEOUT, "HY000",
+                    "分片 $shard 的写者租约被 '${cur.holder}' 持有（epoch ${cur.epoch}），" +
                         "还有 ${cur.remainingMillis()}ms 到期。同一分片任一时刻只能有一个写者。",
                 )
             }
@@ -142,8 +188,9 @@ class LeaseManager(
             attempts++
             if (attempts >= maxAttempts) {
                 Metrics.onLeaseAcquireFailed()
+                // 同样是 1205：撞了一轮说明有别的写者正在抢这个分片，重试是对的答案
                 throw SqlException(
-                    MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
+                    MySqlErrors.ER_LOCK_WAIT_TIMEOUT, "HY000",
                     "无法取得分片 $shard 的租约：连续 $attempts 次与别人相撞",
                 )
             }

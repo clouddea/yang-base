@@ -585,16 +585,37 @@ class LsmStore(
      * 变成写者（拿到更大的 epoch）。抢不到时给一句能直接定位的话——
      * 使用者在多 CN 部署下看到的应当是"这个分片现在由别的 CN 写"，
      * 而不是一个 NPE 或者含糊的 IO 错误。
+     *
+     * ## 为什么不把异常吞成 null（issue #14）
+     *
+     * 之前这里是 `runCatching { acquire() }.getOrNull()`，两个问题：
+     *  1. **诊断信息丢了**：`LeaseManager` 明明知道**谁**持有、还有多久到期（它刚从租约对象里读的，
+     *     MS 模式则是共识状态给的），却在这里被吞掉，只留下一句笼统的“被其他节点持有”。
+     *     使用者拿到这句话没法行动：该去哪台机器？等多久？
+     *  2. **坐标错了**：对象存储瞬时故障（超时/5xx）也被归成"不是写者"，
+     *     于是真正的 IO 问题被报成了一个永远不会自愈的伪结论。
+     *
+     * 现在：协调层的异常**原样上抛**，只换错误码（见下）。写入尚未开始（WAL 还没收到这个 batch），
+     * 所以它是一个**确定可重试**的失败。
+     *
+     * ## 为什么是 1205（`ER_LOCK_WAIT_TIMEOUT`）而不是 1105
+     *
+     *  - 语义对得上：分片写权是一个**被别人占着的互斥资源**，1205 正是 MySQL 表达这件事的方式；
+     *  - 客户端能懂：Connector/J 把 1205/1213 映射成可重试的事务异常，HikariCP 等连接池据此重试；
+     *    1105 只是个"未知错误"，任何框架都只能把它当致命错。
+     *  - 不假装是死锁/串行化冲突：SQLState 仍用 `HY000`。用 `40001` 会让客户端以为
+     *    "事务被回滚、可以整体重跑"——而这里事务根本没开始执行，两者对重试的约束不同。
      */
     private suspend fun ensureWriter() {
         if (lease != null && !leaseLost && !readOnlyShard) return
-        val acquired = runCatching { leaseProvider.acquire(shard) }.getOrNull()
-        if (acquired == null) {
+        val acquired = try {
+            leaseProvider.acquire(shard)
+        } catch (e: com.cloudea.yangbase.common.SqlException) {
             throw com.cloudea.yangbase.common.SqlException(
-                com.cloudea.yangbase.common.MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
-                "本节点不是分片 $shard 的写者（写者租约被其他节点持有）。" +
-                    "同一分片任一时刻只能有一个写者（设计文档 §4.3）——" +
-                    "请稍后重试，或把该分片的写入路由到它的属主节点",
+                com.cloudea.yangbase.common.MySqlErrors.ER_LOCK_WAIT_TIMEOUT, "HY000",
+                "本节点不是分片 $shard 的写者：${e.message}。" +
+                    "写入尚未开始，重试是安全的；若始终打不通，说明写请求应当发给属主 CN" +
+                    "（`yb-cli shards --owner` 可查当前属主与到期时间）",
             )
         }
         // 拿到租约：升格成写者。**必须换 epoch 前缀**（`wal/e{epoch}/`），
