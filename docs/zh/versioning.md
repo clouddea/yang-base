@@ -132,6 +132,11 @@ git tag -a v0.2.0 -m "YangBase 0.2.0" && git push origin v0.2.0
 #   → release.yml：校验 tag == version.txt，跑 build + integrationTest，
 #     用 CHANGELOG 那一段发布 GitHub Release，上传发行包
 
+# ── 当天：把文档站的源切到已发布的树，而不是开发分支 ──
+gh api -X PUT repos/clouddea/yang-base/pages -f "source[branch]=main" -f "source[path]=/docs"
+#   → 站点必须由已发布的内容构建；源分支留在 dev/X.Y.Z 会把未发布
+#     （可能还是坏的）文档发到公开地址上
+
 # ── 紧接着：冻结旧版本、开下一个窗口 ──
 echo "dev/0.2.0" >> .github/frozen-branches.txt     # 经 PR 提交到 main
 git switch main && git switch -c dev/0.3.0          # 下一个 MINOR 窗口
