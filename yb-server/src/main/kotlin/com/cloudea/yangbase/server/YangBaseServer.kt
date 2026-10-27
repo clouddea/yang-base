@@ -375,13 +375,32 @@ class YangBaseServer(
         }
 
         startCoordination(store)
+
+        val effectiveCommitMode = parseCommitMode(config.commitMode)
+        // ★ RPO > 0 必须**在启动时就喊出来**，而不是等人去翻文档。
+        //
+        // 这个模式的危险在于「写成功了」和「数据真的在」是两件事，而使用者
+        // 看了太多遍文档之后只会记住前半句。所以：启动日志 + 指标 + 兼容性文档
+        // 三处同时说，缺一处就有人会在一次重启后少掉一批数据。
+        if (!effectiveCommitMode.waitForDurability) {
+            System.err.println(
+                "[YangBase] ⚠️⚠️ commit_mode=async：RPO > 0。" +
+                    "已向客户端确认但尚未落盘的写入（上限 ≈ " +
+                    "${com.cloudea.yangbase.storage.ASYNC_UPLOAD_QUEUE} 批 × " +
+                    "${effectiveCommitMode.windowMillis}ms 窗口）在进程崩溃时会丢；" +
+                    "并且 ACK 时对象还没落地，**其它 CN 立刻读看不到**（本 CN 读得到）。" +
+                    "监控看 yb_async_commit_inflight，非零就是当前失效窗口。" +
+                    "不需要这个语义请用 --commit-mode sync（默认）。",
+            )
+        }
+
         engine = DatabaseEngine(
             store = store,
             allowNonAtomicPointerSwitch = config.allowNonAtomicPointerSwitch,
             scope = scope,
             nodeId = config.nodeId,
             cacheBytes = config.cacheBytes,
-            commitMode = parseCommitMode(config.commitMode),
+            commitMode = effectiveCommitMode,
             coordination = coordination,
             diskCache = config.diskCacheDir?.let {
                 com.cloudea.yangbase.storage.DiskCache(java.nio.file.Path.of(it), config.diskCacheBytes)
@@ -965,12 +984,9 @@ private fun buildLeaseProvider(
 private fun parseCommitMode(s: String): com.cloudea.yangbase.storage.CommitMode = when (s.lowercase()) {
     "sync" -> com.cloudea.yangbase.storage.CommitMode.SYNC
     "batch" -> com.cloudea.yangbase.storage.CommitMode.BATCH
-    "async" -> throw IllegalArgumentException(
-        "commit_mode=async 尚未实现：它要求「不等 PUT 完成就 ACK」，" +
-            "而当前组提交写者会等待落盘。开启它会得到 RPO=0 的行为却对外声称 RPO>0。" +
-            "见设计文档 §6.3.4。"
-    )
-    else -> throw IllegalArgumentException("未知的 commit_mode '$s'（支持 sync / batch）")
+    // 启动时会在上面打一条显式的 RPO > 0 警告；这里不再重复解释
+    "async" -> com.cloudea.yangbase.storage.CommitMode.ASYNC
+    else -> throw IllegalArgumentException("未知的 commit_mode '$s'（支持 sync / batch / async）")
 }
 
 private fun parseArgs(args: Array<String>): Map<String, String> {
