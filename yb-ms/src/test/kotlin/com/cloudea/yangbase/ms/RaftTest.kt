@@ -36,7 +36,7 @@ class RaftTest {
      * 已经在任的领导者也无法提交新的日志。
      */
     @Test
-    fun `多数派才能选出领导者并提交`() = runBlocking {
+    fun `多数派才能选出领导者并提交`() = runBlocking<Unit> {
         val store = MemoryObjectStore()
         val s = scope()
         val cluster = InProcessMetaCluster.start(3, store, s, electionTimeoutMillis = 300L..600L)
