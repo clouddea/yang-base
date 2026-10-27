@@ -1,3 +1,6 @@
+---
+---
+
 # Getting Started
 
 [English](getting-started.md) | [简体中文](../zh/user-guide.md)

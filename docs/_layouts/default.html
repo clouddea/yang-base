@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="{{ page.lang | default: site.lang | default: 'en' }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="{{ '/' | relative_url }}">{{ site.title }}</a>
+    <nav>
+      <a href="{{ '/en/README.html' | relative_url }}">Docs (EN)</a>
+      <a href="{{ '/zh/README.html' | relative_url }}">文档（中文）</a>
+      <a href="{{ '/zh/yangbase-design.html' | relative_url }}">设计文档</a>
+      <a href="https://github.com/clouddea/yang-base">GitHub</a>
+    </nav>
+  </header>
+
+  <main class="content">
+    {{ content }}
+  </main>
+
+  <footer class="site-footer">
+    <span>Apache-2.0 · <a href="https://github.com/clouddea/yang-base">clouddea/yang-base</a></span>
+    <span>这个版本没有认证与 TLS，只在受信网络里部署。</span>
+  </footer>
+</body>
+</html>

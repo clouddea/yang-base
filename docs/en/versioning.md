@@ -1,3 +1,6 @@
+---
+---
+
 # Versioning and Release Policy
 
 [English](versioning.md) | [简体中文](../zh/versioning.md)
@@ -70,7 +73,7 @@ main  ──●──────────────●──────�
 **Once `vX.Y.Z` is tagged, version `X.Y.Z` is closed. No further commits.**
 
 - `dev/X.Y.Z` is **frozen** — read-only. It is listed in
-  [`.github/frozen-branches.txt`](../../.github/frozen-branches.txt), and CI fails any pull request
+  [`.github/frozen-branches.txt`](https://github.com/clouddea/yang-base/blob/main/.github/frozen-branches.txt), and CI fails any pull request
   that targets a frozen branch. It is kept for 90 days as a reference, then deleted.
 - The tag is protected: it cannot be moved or deleted (repository ruleset `protect-release-tags`).
 - A new feature or a new fix **never** lands on a released version. It opens the next version:

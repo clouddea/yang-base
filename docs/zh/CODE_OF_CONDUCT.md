@@ -1,6 +1,9 @@
+---
+---
+
 # 贡献者行为准则（Contributor Covenant）
 
-[English](../../CODE_OF_CONDUCT.md) | [简体中文](CODE_OF_CONDUCT.md)
+[English](https://github.com/clouddea/yang-base/blob/main/CODE_OF_CONDUCT.md) | [简体中文](CODE_OF_CONDUCT.md)
 
 ## 我们的承诺
 

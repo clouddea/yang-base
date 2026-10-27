@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase 文档（简体中文）
 
 [English](../en/README.md) | [简体中文](README.md)
@@ -18,7 +21,7 @@
 | [code-review-2026-09.md](code-review-2026-09.md) | **回归清单**：一次系统性审查的 59 条发现项、每条"当初为什么会发生"与"哪条测试盯着它" | 两轮处置完毕（2026-09-25） |
 
 > 项目当前进度（哪些已实现、哪些还没做）统一维护在
-> [PROJECT_GUIDE.md](../../PROJECT_GUIDE.md) 的「版本状态」一节，本文件不重复。
+> [PROJECT_GUIDE.md](https://github.com/clouddea/yang-base/blob/main/PROJECT_GUIDE.md) 的「版本状态」一节，本文件不重复。
 
 ## 一句话定位
 
@@ -98,5 +101,5 @@
 **当前状态：M0 已完成并通过验收，M1–M3 的核心部分也已落地**（LSM 引擎与崩溃恢复、
 MVCC 快照隔离、跨分片 2PC、四类索引与全文检索、分区裁剪、MySQL 协议、
 元数据服务 MS 等）。已实现与未实现的完整清单见
-[PROJECT_GUIDE.md](../../PROJECT_GUIDE.md) 的「版本状态」一节；使用侧的限制见
+[PROJECT_GUIDE.md](https://github.com/clouddea/yang-base/blob/main/PROJECT_GUIDE.md) 的「版本状态」一节；使用侧的限制见
 [compatibility.md](compatibility.md)。

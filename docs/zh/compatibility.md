@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase 兼容性与限制清单
 
 [English](../en/compatibility.md) | [简体中文](compatibility.md)
@@ -569,7 +572,7 @@ MySQL 也是这样——`CLIENT_MULTI_STATEMENTS` 是一个让客户端声明
 > 上表里**只有最后一列「请求数」是确定性的**——延迟与吞吐受环境影响大，换真实
 > 对象存储只改延迟（单次 PUT 约 4 ms，云上还要再高一个数量级），**不改请求数**：
 > 点查 0.004 次、`COUNT(*)` 0 次、组提交摊薄 14.5 倍都是架构性质。完整的后端对比见
-> [README](../../README.zh-CN.md) 的「性能（实测）」一节。
+> [README](https://github.com/clouddea/yang-base/blob/main/README.zh-CN.md) 的「性能（实测）」一节。
 
 **冷热差是几十倍的量级**，这与对象存储作为数据层的物理下界有关，
 任何优化都消不掉。因此 SLO 必须分「缓存命中」与「未命中」两栏陈述
