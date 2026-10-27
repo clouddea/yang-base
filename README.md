@@ -500,7 +500,7 @@ See [CLAUDE.md](CLAUDE.md). The ones easiest to trip over:
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) — it covers the build, the test expectations, and the project rules that are not negotiable (request-count budgets, immutable objects, `.idx`/`.dat` separation). All participants are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Branching model: `feature/*` and `bugfix/*` are branched from `dev/<version>` and squash-merged back into it; `main` is only updated when a release is cut. Details in [Development process](docs/zh/development-process.md) (Chinese).
+Branching model: `feature/*` and `bugfix/*` are branched from `dev/<version>` and squash-merged back into it; `main` is only updated when a release is cut. **A version that has been tagged is frozen — it takes no further commits; new work opens a new version.** One release ships every Friday. Version numbers, the freeze rule and the release gate (no release with a known major defect) are in [docs/en/versioning.md](docs/en/versioning.md); the branch mechanics are in [Development process](docs/zh/development-process.md) (Chinese).
 
 ---
 

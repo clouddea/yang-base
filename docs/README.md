@@ -19,7 +19,7 @@ All documentation is maintained in two languages:
 - **Want to know how it works?** → [Architecture Overview](en/architecture.md)
 - **Migrating an existing MySQL app?** → [Compatibility and Limitations](en/compatibility.md)
 - **Choosing or verifying an object store?** → [Object Storage Backends](en/backends.md)
-- **Want to contribute?** → [CONTRIBUTING.md](../CONTRIBUTING.md) and [Development process](zh/development-process.md) (Chinese)
+- **Want to contribute?** → [CONTRIBUTING.md](../CONTRIBUTING.md), [Versioning & release policy](en/versioning.md), and [Development process](zh/development-process.md) (Chinese)
 
 ## Documentation status
 
@@ -31,6 +31,7 @@ All documentation is maintained in two languages:
 | Object storage backends | ✅ [backends.md](en/backends.md) | ✅ [backends.md](zh/backends.md) |
 | Index benchmarks | — | ✅ [index-bench.md](zh/index-bench.md) |
 | Development process | — | ✅ [development-process.md](zh/development-process.md) |
+| Versioning & release policy | ✅ [versioning.md](en/versioning.md) | ✅ [versioning.md](zh/versioning.md) |
 | Code review regression list | — | ✅ [code-review-2026-09.md](zh/code-review-2026-09.md) |
 | SQL test manual | — | ✅ [sql-manual/](sql-manual/CASES.md) |
 
