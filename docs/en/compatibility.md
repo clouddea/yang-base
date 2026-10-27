@@ -461,23 +461,34 @@ Rationale: a local FS provides neither cross-process atomicity for conditional w
 while production depends on object-storage semantics" is the most dangerous class of defect source (design doc §3.3).
 With the flag present, a prominent warning is printed and the server continues.
 
-### 4.5.3 Commit Modes (`commit-mode`): `sync` by Default, `batch` Optional, `async` Explicitly Rejected
+### 4.5.3 Commit Modes (`commit-mode`): `sync` by Default, `batch` and `async` Optional
 
 | Mode | Status | Semantics |
 |---|---|---|
 | `sync` | ✅ **factory default** | The group-commit writer ACKs only after the PUT is durable. **RPO = 0** (batching window 5 ms / 256 KB) |
 | `batch` | ✅ available | For high-throughput imports; **also waits for durability, RPO = 0**, just with a wider window (50 ms / 4 MB) ⇒ more PUT amortization, higher per-transaction latency |
-| `async` | ❌ **explicitly rejected** | The server reports "not implemented yet" at startup and **exits**; it does not start in a broken state |
+| `async` | ⚠️ available, **must be declared explicitly** | ACKs as soon as the PUT is **issued** (does not wait for it); a background coroutine completes the write. **RPO > 0**: a crash loses writes that were ACKed but not yet durable |
 
 ```bash
-# Deployment-level setting, chosen only here: sync (default) / batch
+# Deployment-level setting, chosen only here: sync (default) / batch / async
 ./gradlew :yb-server:run --args="--s3-bucket my-bucket --commit-mode batch"
 ```
 
-**Why `async` is a hard rejection instead of "accept it for now"**: it requires "ACK without waiting for the PUT to complete",
-whereas the current group-commit writer waits for durability. Accepting it would produce an instance that **behaves with RPO=0 while claiming RPO>0** —
-a fake durability promise is far more dangerous than not having the mode at all (design doc §6.3.4).
-Doing it for real requires a separate batching/flush path first.
+**What `async` actually gives up** (three things, and all three matter):
+
+1. **RPO > 0**: a process crash loses writes that were ACKed but not yet durable. The bound is "upload queue of 64 batches × 100 ms window",
+   not infinity — when the queue fills up the group-commit loop blocks (backpressure), which surfaces as higher latency rather than unbounded memory.
+2. **Cross-CN visibility is one round trip late**: at ACK time the object is not on the object store yet, so another CN reading immediately will **not** see it.
+   Within the same CN it is visible (the MemTable is applied before the ACK). So this is **not** strong consistency.
+3. **A failed write is not rolled back**: the client already got success, so the background path retries indefinitely;
+   a batch only counts as lost if it still cannot be written during shutdown, which increments `yb_async_commit_lost_total` (non-zero means real loss).
+
+How to see the current exposure window: `yb_async_commit_inflight` (non-zero = N batches ACKed but not durable) and
+`yb_commit_mode_rpo_gt0` (1 = this instance promises RPO > 0). Startup also prints an explicit RPO warning, and
+`SHOW VARIABLES LIKE 'commit_mode'` truthfully reports `async`.
+
+> The default is still `sync`: `async` is for workloads that can tolerate a loss window (bulk imports, log-style writes),
+> not a generic performance switch. If in doubt, stay on `sync`.
 
 **The session-level `SET commit_mode` can only equal the deployment value**:
 
@@ -531,7 +542,7 @@ A server treating it as default behaviour would be closing that gate on the clie
 | DDL | locks the table in some cases | fully online (metadata operations), including index creation (§8.7) |
 | Unique constraint implementation | next-key locks | atomic duplicate detection on the index shard (one extra RTT across shards) |
 | **String comparison / collation** | per-column collation, default `utf8mb4_0900_ai_ci` (case-insensitive) | **always binary order** (equivalent to `utf8mb4_bin`); the reported collation name does not match the actual semantics, **see 4.3.1** |
-| **Commit mode** | — | deployment-level `--commit-mode`: `sync` (default) / `batch`; `async` explicitly rejected. Session-level `SET commit_mode` can only equal the deployment value, **see 4.5.3** |
+| **Commit mode** | — | deployment-level `--commit-mode`: `sync` (default) / `batch` / `async`. `async` has RPO > 0 and cross-CN visibility one round trip late, **see 4.5.3** |
 | NULL position in `ORDER BY` | NULL sorts lowest | matches MySQL |
 | Next value after explicitly inserting a large value into an auto-increment column | value + 1 | value + 1 (✅ consistent) |
 | `information_schema` coverage | complete | common views are all present; some detail fields may be empty |

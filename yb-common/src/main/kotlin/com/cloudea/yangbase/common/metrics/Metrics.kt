@@ -487,6 +487,45 @@ object Metrics {
         return if (g == 0L) 0.0 else groupCommitBatches.value().toDouble() / g
     }
 
+    // ── ASYNC 提交（commit_mode=async，RPO > 0）──────────────────
+    //
+    // 这组指标存在的唯一目的：让「已经 ACK 但还没落盘」这个状态**可观测**。
+    // 没有它们，RPO > 0 就只是文档上的一句话——出了事没人看得到。
+
+    private val asyncInflight = java.util.concurrent.atomic.AtomicLong(0)
+    private val asyncPutFailures = registry.counter("yb_async_commit_put_failures_total")
+    private val asyncLost = registry.counter("yb_async_commit_lost_total")
+    private val rpoGt0 = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    init {
+        registry.help(
+            "yb_async_commit_inflight",
+            "已向客户端 ACK、但 WAL 对象尚未落盘的批次数。仅 commit_mode=async 下非零；" +
+                "它就是当前的失效窗口（进程此刻崩掉会丢这些）",
+        )
+        registry.help("yb_async_commit_put_failures_total", "async 模式落盘失败的重试次数（不丢数据，只是推迟）")
+        registry.help(
+            "yb_async_commit_lost_total",
+            "★ async 模式被放弃的批次（关闭前重试仍失败）。非零 = 确实丢了已 ACK 的写入",
+        )
+        registry.help("yb_commit_mode_rpo_gt0", "1 表示当前部署的 commit_mode 是 async（RPO > 0）")
+        registry.gauge("yb_async_commit_inflight", emptyList()) { asyncInflight.get().toDouble() }
+        registry.gauge("yb_commit_mode_rpo_gt0", emptyList()) { if (rpoGt0.get()) 1.0 else 0.0 }
+    }
+
+    /** 由 `WalWriter` 在构造时上报：这是**部署级**语义，不是会话级的。 */
+    fun setCommitModeRpoGt0(v: Boolean) = rpoGt0.set(v)
+
+    /** 一批被 ACK（但还没落盘）。 */
+    fun asyncCommitInFlight() = asyncInflight.incrementAndGet()
+
+    /** 一批落盘成功。 */
+    fun asyncCommitDurable() = asyncInflight.decrementAndGet()
+
+    fun asyncCommitPutFailure() = asyncPutFailures.inc()
+
+    fun asyncCommitLost() = asyncLost.inc()
+
     // ── 租约（§4.3 / §12.5）───────────────────────────────────────
     //
     // 只在 `--coord-mode objectstore` 下会被触发：单机模式用 SingleProcessLease，
