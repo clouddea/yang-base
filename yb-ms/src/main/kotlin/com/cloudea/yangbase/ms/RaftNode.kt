@@ -81,7 +81,35 @@ class RaftNode(
      * 而该有的只有 6 次）。
      */
     private val replicateTimeoutMillis: Long = (electionTimeoutMillis.first / 2).coerceAtLeast(50),
+    /**
+     * 客户端等"这条日志被多数派确认"的上限（毫秒）。超时回 [MetaResponse.Error]（提交超时）。
+     *
+     * 默认由 [replicateTimeoutMillis] 推导（两轮复制的量），**生产行为不变**。
+     * 留成可覆盖的参数，是因为这个值只对"一轮复制能在多久内完成"有意义，
+     * 而这件事取决于**后端存储的延迟**，不是共识算法：内存 store 是纳秒级，
+     * 内嵌 S3 走 HTTP + 真实 PUT 是毫秒级，CI 上 2 核 runner 跑集成测试时还会更慢。
+     * 集成测试因此需要比默认值宽松得多的预算，而**不应该**为此去放大选举超时
+     * （那会同时改变集群的重选行为，测试就不再测它本来要测的东西）。
+     */
+    commitTimeoutMillisOverride: Long? = null,
 ) : MetaRpcHandler {
+
+    /** 提交等待的实际预算：[commitTimeoutMillisOverride] 优先，否则由复制超时推导。 */
+    private val commitTimeoutMillis: Long = commitTimeoutMillisOverride ?: (replicateTimeoutMillis * 2)
+
+    /**
+     * 一轮拉票的等待上限。
+     *
+     * **不能**沿用 [replicateTimeoutMillis]（那是「把一批日志推给一个跟随者」的预算）：
+     * 一轮投票对跟随者来说是「落盘硬状态 + 回包」，即一次完整的 PUT。高延迟后端上
+     * 这就是几百毫秒，而 [replicateTimeoutMillis] 是按「选举超时的一半」推的，拿它当
+     * 投票截止时间，等于要求跟随者在半个选举窗口内完成一次落盘——超时的那一票直接丢，
+     * 集群一直凑不齐多数派。
+     *
+     * 上限取一个完整的最小选举窗口：再长就没意义了，因为超过它之后候选者自己就会
+     * 重新发起一轮选举。
+     */
+    private val voteTimeoutMillis: Long = electionTimeoutMillis.first
 
     enum class Role { FOLLOWER, CANDIDATE, LEADER }
 
@@ -159,6 +187,21 @@ class RaftNode(
     private var heartbeatJob: Job? = null
     private var snapshotJob: Job? = null
     private var lastHeartbeatAt = System.currentTimeMillis()
+
+    /**
+     * 选举计时器被重置过几次。
+     *
+     * 用来让 [electionLoop] 判断"自己手上那次抽签是不是已经作废"。比拿
+     * [lastHeartbeatAt] 当标记可靠：心跳与投票落在同一毫秒时时间戳不变，
+     * 标记就会漏掉一次重置。
+     */
+    private var heartbeatEpoch = 0L
+
+    /** 记一次"确认了领导者 / 投出了一票"——选举计时器从这里重新起算。 */
+    private fun markHeartbeat() {
+        lastHeartbeatAt = System.currentTimeMillis()
+        heartbeatEpoch++
+    }
 
     /** 只用于诊断：`/metrics` 与测试断言。 */
     val term: Long get() = currentTerm
@@ -353,14 +396,46 @@ class RaftNode(
 
     // ── 选举 ──────────────────────────────────────────────────────
 
+    /**
+     * 选举计时器。
+     *
+     * ★ **随机超时每次重置只抽一次**，不是每个 tick 重抽。
+     *
+     * 曾经写成每 20ms 重抽一次，看起来"更随机"，实际效果恰好相反：每个 tick 都是
+     * 一次"现在够久了吗"的重新掷骰，于是**所有节点的实际等待时间都收敛到区间的下沿**
+     * （时间越久，抽到一个"已经满足"的值的概率越高，先抽中的那个 tick 就触发了）。
+     * 同时启动的三个节点于是在同一时刻变成候选人、各投自己、再互相拒绝——选票被
+     * 反复瓜分，任期一路涨到几十也选不出领导者。
+     *
+     * 这个缺陷只在**高延迟后端**上暴露：内嵌存储的往返是亚毫秒，节点之间那点
+     * 抽签差异（几十毫秒）远大于一次落盘 + 一轮投票的耗时，谁先抽中就谁当选；
+     * 而真实对象存储一次 PUT 就是几百毫秒，先抽中的优势被抹平，锁步重新回到
+     * 同一时刻，于是永远平票。真实阿里云 OSS 上 `MultiCnCoordinationTest` 的
+     * 5 个用例全部卡在 `MS 集群没有选出领导者` 就是这个原因。
+     */
     private suspend fun electionLoop() {
+        var drawnAtEpoch = -1L          // 手上这次抽签是基于哪一次重置算的
+        var deadline = Long.MAX_VALUE   // 抽签结果：到点就发起选举
         while (true) {
             delay(20)
-            val timeout = Random.nextLong(electionTimeoutMillis.first, electionTimeoutMillis.last + 1)
-            val need = mutex.withLock {
-                role != Role.LEADER && System.currentTimeMillis() - lastHeartbeatAt >= timeout
+            var fire = false
+            mutex.withLock {
+                if (role == Role.LEADER) {
+                    // 领导者自己就是心跳源，不参与计时；下台之后重新抽签
+                    drawnAtEpoch = -1L
+                    deadline = Long.MAX_VALUE
+                } else {
+                    if (drawnAtEpoch != heartbeatEpoch) {
+                        drawnAtEpoch = heartbeatEpoch
+                        deadline = lastHeartbeatAt + Random.nextLong(
+                            electionTimeoutMillis.first,
+                            electionTimeoutMillis.last + 1,
+                        )
+                    }
+                    fire = System.currentTimeMillis() >= deadline
+                }
             }
-            if (need) startElection()
+            if (fire) startElection()
         }
     }
 
@@ -369,34 +444,53 @@ class RaftNode(
             currentTerm += 1
             role = Role.CANDIDATE
             votedFor = nodeId
-            lastHeartbeatAt = System.currentTimeMillis()
-            persistHardState()
+            markHeartbeat()
             Triple(currentTerm, lastLogIndex(), lastLogTerm())
         }
-        var votes = 1                                   // 自己投自己
+        // 自己的任期与选票必须先落盘，才能向别人拉票（Raft §5.2）。但落盘**不持锁**：
+        // 一次 PUT 在高延迟后端上是几百毫秒，持锁等它会把这段时间内到达的心跳与投票
+        // 请求全部堵在队列里——它们等不到，就各自发起选举，集群于是永远在选。
+        // 锁外落盘是安全的：内存里的 votedFor 在锁内就已经写好，并发的投票请求会看到
+        // "本任期已投给自己"从而拒绝，不会出现同一个任期投两票。
+        if (runCatching { persistHardState() }.isFailure) {
+            // 连自己的选票都存不下来：这一轮不拉票，等下一次超时重来
+            mutex.withLock { if (role == Role.CANDIDATE && currentTerm == term) role = Role.FOLLOWER }
+            return
+        }
         val need = (peers.size + 1) / 2 + 1             // 多数派
-        // ⚠️ 这个检查必须**在循环之前**也做一次：单节点集群（peers 为空）时下面的
-        // for 循环一次都不执行，于是"自己就是多数派"这件事永远不会被检查到——
+        var votes = 1                                   // 自己投自己
+        // ⚠️ 这个检查必须**在拉票之前**也做一次：单节点集群（peers 为空）时下面的
+        // 并发拉票一次都不执行，于是"自己就是多数派"这件事永远不会被检查到——
         // 表现为任期一路涨到几十却永远选不出领导者（而且不报错）
         if (votes >= need) {
             becomeLeader(term)
             return
         }
-        for (peer in peers) {
-            val resp = withTimeoutOrNull(replicateTimeoutMillis) {
-                runCatching {
-                    transport.raft(peer, RaftMessage.RequestVote(term, nodeId, lastIdx, lastTerm))
-                }.getOrNull()
-            } as? RaftMessage.VoteResponse ?: continue
+        // ★ 拉票**并发**发出去，与复制走同一条理由：串行拉票时，一个慢节点会把
+        // 整轮选举拖到超过选举超时，其他人又开始新一轮——这是"高延迟后端选不出
+        // 领导者"的直接放大器。
+        val responses = kotlinx.coroutines.coroutineScope {
+            peers.map { peer ->
+                async {
+                    withTimeoutOrNull(voteTimeoutMillis) {
+                        runCatching {
+                            transport.raft(peer, RaftMessage.RequestVote(term, nodeId, lastIdx, lastTerm))
+                        }.getOrNull()
+                    } as? RaftMessage.VoteResponse
+                }
+            }.map { it.await() }
+        }
+        for (resp in responses) {
+            if (resp == null) continue                       // 超时/不可达：这一票没有
             if (resp.term > term) {
                 mutex.withLock { stepDown(resp.term) }
                 return
             }
             if (resp.granted) votes++
-            if (votes >= need) {
-                becomeLeader(term)
-                return
-            }
+        }
+        if (votes >= need) {
+            becomeLeader(term)
+            return
         }
         // 没选上：回到跟随者，等下一个（随机）超时再来
         mutex.withLock { if (role == Role.CANDIDATE && currentTerm == term) role = Role.FOLLOWER }
@@ -436,9 +530,46 @@ class RaftNode(
             votedFor = null
             persistHardState()
         }
+        demoteLocked(newTerm)
+    }
+
+    /**
+     * 从领导者变回跟随者时**必须**做的三件事（调用方必须已持 [mutex]）。
+     *
+     * 这是 issue #5（CI flaky，“提交超时 5000ms：多数派未能确认日志 2”）的真身：
+     * 领导者受理了一笔写入、还没复制给多数派就因别的原因下台了；新领导者的日志里
+     * 没有这一条，它会直接覆盖那个下标——旧等待者永远等不到唤醒，挂满整个提交预算
+     * 才报「多数派未能确认」。**集群是健康的，真正发生的事是“换人了”**，
+     * 而错误信息把人指向网络与共识。
+     *
+     * 所以“下台”这动作必须包含：取消心跳（不再对外代表本任期）、
+     * 把未确认的等待者当场失败掉（带上如实的原因），而不是靠超时兜底。
+     *
+     * 语义上要说清两件事：① 这笔写入**结果未知**（可能已被多数派复制并提交，
+     * 只是本节点没来得及得知）；② 所以它是**可重试**的——MS 的写请求全是
+     * "分配/抬水位"这一类，重试最多浪费一段号段或抬一次 epoch，不会重复生效。
+     * 用 `NotLeader` 表达是不诚实的（那是“我没做”），所以用带说明的 `Error`。
+     */
+    private fun demoteLocked(term: Long) {
+        val wasLeader = role == Role.LEADER
         role = Role.FOLLOWER
+        if (!wasLeader) return
         heartbeatJob?.cancel()
         heartbeatJob = null
+        failPending("领导者已变更（任期 $term）：本节点未确认的请求结果未知，请重试", term)
+    }
+
+    /**
+     * 把当前所有等待者以同一个错误唤醒并清空。
+     *
+     * 只在下台时调用：**已提交的条目在下台前就已经 `complete` 了**
+     * （`applyCommittedLocked` 与 `stepDown` 都在同一把锁下），所以这里清掉的
+     * 一定都是"没等到确认"的。
+     */
+    private fun failPending(message: String, term: Long) {
+        if (pending.isEmpty()) return
+        val err = MetaResponse.Error(term, message)
+        for (key in pending.keys.toList()) pending.remove(key)?.complete(err)
     }
 
     private suspend fun heartbeatLoop(term: Long) {
@@ -673,9 +804,15 @@ class RaftNode(
         // （自己是唯一多数派）靠的就是这里，而不是等下一轮心跳
         mutex.withLock { advanceCommit(entry.term) }
         replicate(entry.term)
-        val result = withTimeoutOrNull(replicateTimeoutMillis * 2) { waiter.await() }
+        val result = withTimeoutOrNull(commitTimeoutMillis) { waiter.await() }
         pending.remove(entry.index)
-        return result ?: MetaResponse.Error(entry.term, "提交超时（${replicateTimeoutMillis * 2}ms）：多数派未能确认日志 ${entry.index}")
+        // 注意：如果期间下过台，`stepDown` 已经把等待者当场完成掉了（带着
+        // “领导者已变更”的说明），所以这里拿到的**不是**超时——只有集群一直
+        // 健康但多数派真的凑不齐时，才会走到这条超时分支
+        return result ?: MetaResponse.Error(
+            entry.term,
+            "提交超时（${commitTimeoutMillis}ms）：多数派未能确认日志 ${entry.index}",
+        )
     }
 
     /** 等到"本任期的第一条日志已提交"为止。见 [leaderReadyTerm] 的说明。 */
@@ -723,24 +860,44 @@ class RaftNode(
             MetaResponse.Error(currentTerm, "响应不该发给服务端").let { RaftMessage.AppendResponse(currentTerm, false, 0) }
     }
 
-    private suspend fun handleRequestVote(m: RaftMessage.RequestVote): RaftMessage = mutex.withLock {
-        if (m.term < currentTerm) return@withLock RaftMessage.VoteResponse(currentTerm, false)
-        if (m.term > currentTerm) {
-            currentTerm = m.term
-            votedFor = null
-            role = Role.FOLLOWER
-            persistHardState()
+    private suspend fun handleRequestVote(m: RaftMessage.RequestVote): RaftMessage {
+        // ★ 锁内只做**决定**，落盘放到锁外。
+        //
+        // 与 [startElection] 同一条理由：一次 PUT 在高延迟后端上是几百毫秒，持锁等它
+        // 会把同时到达的心跳、投票、复制请求全部堵在这把锁上——它们等不到就各自发起
+        // 选举。而“不重复授予”这件事**不需要**靠锁 + 落盘来保证：votedFor 在锁内就
+        // 已经写好了，并发的投票请求会看到它。
+        var canVote = false
+        var needPersist = false
+        mutex.withLock {
+            if (m.term < currentTerm) return RaftMessage.VoteResponse(currentTerm, false)
+            if (m.term > currentTerm) {
+                currentTerm = m.term
+                votedFor = null
+                // 选举请求来自更高任期 ⇒ 本节点（若是领导者）当场下台，
+                // 未确认的写入必须立刻失败（否则要挂满整个提交预算才知道换人了）
+                demoteLocked(m.term)
+                needPersist = true
+            }
+            // "日志至少一样新"：候选人的日志更旧就不投它——否则已提交的条目可能被覆盖
+            val atLeastAsNew = m.lastLogTerm > lastLogTerm() ||
+                (m.lastLogTerm == lastLogTerm() && m.lastLogIndex >= lastLogIndex())
+            canVote = (votedFor == null || votedFor == m.candidateId) && atLeastAsNew
+            if (canVote) {
+                votedFor = m.candidateId
+                markHeartbeat()
+                needPersist = true
+            }
         }
-        // "日志至少一样新"：候选人的日志更旧就不投它——否则已提交的条目可能被覆盖
-        val atLeastAsNew = m.lastLogTerm > lastLogTerm() ||
-            (m.lastLogTerm == lastLogTerm() && m.lastLogIndex >= lastLogIndex())
-        val canVote = (votedFor == null || votedFor == m.candidateId) && atLeastAsNew
-        if (canVote) {
-            votedFor = m.candidateId
-            persistHardState()
-            lastHeartbeatAt = System.currentTimeMillis()
+        if (needPersist) {
+            // 投出去的票必须先落盘再回包（Raft §5.2）：若先回包再崩，重启后的节点会把
+            // 同一任期的票再投给另一个候选人，从而选出一个**少数派**领导者。
+            // 落盘失败就返回拒绝——没存下来的票不能算数。
+            if (runCatching { persistHardState() }.isFailure) {
+                return RaftMessage.VoteResponse(currentTerm, false)
+            }
         }
-        RaftMessage.VoteResponse(currentTerm, canVote)
+        return RaftMessage.VoteResponse(currentTerm, canVote)
     }
 
     private suspend fun handleAppendEntries(m: RaftMessage.AppendEntries): RaftMessage {
@@ -752,9 +909,13 @@ class RaftNode(
                 persistHardState()
             }
             // 收到领导者的心跳：承认它，并重置选举计时器
-            role = Role.FOLLOWER
+            //
+            // ★ 这里曾经直接 `role = Role.FOLLOWER`，于是「领导者收到更高任期的
+            // AppendEntries」这条最常见的换人路径**不算下台**：心跳不停、
+            // 未确认的写入一直挂到提交超时。issue #5 的 flaky 就长这个样子
+            demoteLocked(m.term)
             leaderId = m.leaderId
-            lastHeartbeatAt = System.currentTimeMillis()
+            markHeartbeat()
             if (m.prevLogIndex > 0) {
                 val termAtPrev = entryTermAt(m.prevLogIndex)
                     ?: return@withLock RaftMessage.AppendResponse(currentTerm, false, 0)
@@ -814,9 +975,9 @@ class RaftNode(
         store.put(snapshotKey(), m.snapshot)
         mutex.withLock {
             if (m.term > currentTerm) { currentTerm = m.term; votedFor = null; persistHardState() }
-            role = Role.FOLLOWER
+            demoteLocked(m.term)
             leaderId = m.leaderId
-            lastHeartbeatAt = System.currentTimeMillis()
+            markHeartbeat()
             snapshotLastIndex = snap.lastIncludedIndex
             snapshotLastTerm = snap.lastIncludedTerm
             stateMachine.restore(snap.state, snap.lastIncludedIndex)

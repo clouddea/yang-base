@@ -281,7 +281,7 @@ class OssCompatibilityTest {
     }
 
     @Test
-    fun `弱化模式下过期的写者仍被代际检查挡掉`() = runBlocking {
+    fun `弱化模式下过期的写者仍被代际检查挡掉`() = runBlocking<Unit> {
         // 代际（epoch）检查是弱化模式之后**剩下的那一道**防线，必须单独验证：
         // 指针切换不再原子，但"旧写者不许覆盖新写者"这条规则不能一起丢掉
         val ms = com.cloudea.yangbase.storage.ManifestStore(store, allowNonAtomicPointerSwitch = true)

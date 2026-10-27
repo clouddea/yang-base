@@ -2612,7 +2612,7 @@ class CountingObjectStore(private val delegate: ObjectStore) : ObjectStore {
 
 > ⚠️ **本表是目标态（设计时的选型意图），不是实现现状。**
 > 实现实际用到的依赖、以及每一处偏离的理由，列在
-> [PROJECT_GUIDE.md 的「与设计文档的偏离清单（§15 技术栈）」](../PROJECT_GUIDE.md)。
+> [PROJECT_GUIDE.md 的「与设计文档的偏离清单（§15 技术栈）」](../../PROJECT_GUIDE.md)。
 > 读本表时请对照那份清单——下面这张表里有好几行（ANTLR4、gRPC + Protobuf、
 > Caffeine、RocksDB JNI、RoaringBitmap、zstd、jieba、Micrometer、Kotest、
 > Testcontainers、JMH）**最终没有引入**，其中有的是刻意换掉（为了少一份依赖
@@ -2637,7 +2637,7 @@ class CountingObjectStore(private val delegate: ObjectStore) : ObjectStore {
 > **关于中文分词的现状**：实现里只有 `standard` 与 `ngram` 两个分析器
 > （`Analyzer.kt`；`WITH PARSER ngram` 走的是 CJK 二元切分的兜底模式，
 > 正是 §8.6.4 写的那条兜底路径）。**没有**引入 jieba / HanLP——理由与
-> [Analyzer.kt](../yb-index/src/main/kotlin/com/cloudea/yangbase/index/fulltext/Analyzer.kt)
+> [Analyzer.kt](../../yb-index/src/main/kotlin/com/cloudea/yangbase/index/fulltext/Analyzer.kt)
 > 的注释一致：不为分词引入外部依赖与词典体积，`FullTextIndex` 只依赖 `Analyzer` 接口，
 > 需要真正的分词时实现该接口即可替换。
 
@@ -2856,8 +2856,8 @@ yang-base/
 
 **验收**：一个真实业务（或等价的压测）在其上稳定运行 30 天，且月度账单符合 §13 的估算。
 
-> **实现现状（2026-09）**：M5 的大部分已经提前落地——`batch` 提交档已可用
-> （`--commit-mode batch`；`async` 仍被显式拒绝，见兼容性清单 §4.5.3）、CDC、
+> **实现现状（2026-09）**：M5 的大部分已经提前落地——`batch` 与 `async` 提交档已可用
+> （`--commit-mode batch|async`，均为**部署级**设置；`async` 的 RPO > 0 边界见兼容性清单 §4.5.3）、CDC、
 > PITR / `AS OF TIMESTAMP`、可观测性（`/metrics` + `/healthz` + 慢查询日志）、
 > `yb-cli analyze-sql` 均已实现。仍未做的两条**不是"还没排上"，而是已经决定不做**：
 > **存储分层**（§13.3，成本主线已经解决，见兼容性清单）与**跨 Region 只读副本**

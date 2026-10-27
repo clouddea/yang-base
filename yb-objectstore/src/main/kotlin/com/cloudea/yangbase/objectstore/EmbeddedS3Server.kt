@@ -106,7 +106,13 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
                 respond(ex, status, s3Error(code, "injected failure (测试注入)"), "application/xml")
                 return
             }
-            val path = URLDecoder.decode(ex.requestURI.path, Charsets.UTF_8)
+            // ⚠️ 不能用 `URLDecoder.decode`：那是 **form** 解码，会把 `+` 变成空格。
+            // 键里出现 `+`（合法路径字符，SDK 不会转义）时，对象会写到一个
+            // 「把 + 换成空格」的键上——读的时候又按原键读，于是**写进去读不出来**；
+            // 而键里出现 `%`（同样合法）时 `URLDecoder` 会直接抛
+            // IllegalArgumentException，客户端看到的是 500。
+            // 路径只需要百分号解码，这里照 RFC 3986 自己解。
+            val path = decodePath(ex.requestURI.rawPath)
             // 路径式寻址：/{bucket}/{key}
             val trimmed = path.removePrefix("/")
             val slash = trimmed.indexOf('/')
@@ -161,9 +167,43 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
         }
     }
 
+    /** 按 RFC 3986 解百分号转义；`+` 保持原样（它不是空格）。 */
+    private fun decodePath(raw: String): String {
+        if (raw.indexOf('%') < 0) return raw
+        val out = java.io.ByteArrayOutputStream(raw.length)
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c == '%' && i + 2 < raw.length) {
+                val v = raw.substring(i + 1, i + 3).toIntOrNull(16)
+                if (v != null) {
+                    out.write(v)
+                    i += 3
+                    continue
+                }
+            }
+            // 非转义字符按 UTF-8 逐字符写入（多字节字符在 Kotlin 字符串里是独立 char）
+            out.write(c.toString().toByteArray(Charsets.UTF_8))
+            i++
+        }
+        return String(out.toByteArray(), Charsets.UTF_8)
+    }
+
+    /** 每个键一把锁：条件写的「判断 + 写入」必须原子，否则并发用例测的是假的。 */
+    private val keyLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
     private fun put(ex: HttpExchange, key: String) {
         bump("PUT")
         val body = ex.requestBody.readBytes()
+        // 真实 S3/OSS 对同一键的并发条件写是**原子**的：MustNotExist 并发 8 个只能活 1 个。
+        // 夹具若先判断后写入（不加锁），这条语义就测不出来——而它正是 fencing 与
+        // manifest 指针切换的正确性前提。
+        synchronized(keyLocks.computeIfAbsent(key) { Any() }) {
+            putLocked(ex, key, body)
+        }
+    }
+
+    private fun putLocked(ex: HttpExchange, key: String, body: ByteArray) {
         val ifNoneMatch = ex.requestHeaders.getFirst("If-None-Match")
         val ifMatch = ex.requestHeaders.getFirst("If-Match")
         val forbidOverwrite = ex.requestHeaders.getFirst("x-oss-forbid-overwrite")

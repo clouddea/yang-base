@@ -94,8 +94,13 @@ class Session(val engine: DatabaseEngine) {
     var lastCommitTs: Long = -1L
     var autocommit: Boolean = true
 
-    /** 提交模式。出厂默认 sync；async 必须显式声明（设计文档 §16.1 Q1）。 */
-    var commitMode: String = "sync"
+    /**
+     * 提交模式**不在这里**。它是部署级设置（组提交写者是每分片一个、被所有会话共享的），
+     * 会话里存一个副本只会让 `SHOW` 说谎：曾经这里有个恒为 "sync" 的字段，
+     * 于是服务端 `--commit-mode batch` 启动后 `SHOW VARIABLES LIKE 'commit_mode'`
+     * 依然报 sync——使用者据此判断该用多大并发，而判据是假的。
+     * 现在一律读 `engine.commitMode`。
+     */
 
     /** 最近一次 INSERT 产生的自增值，供 LAST_INSERT_ID() 使用。 */
     var lastInsertId: Long = 0
@@ -346,7 +351,7 @@ class OkResult(
  * （设计文档 §10.2 R1–R6）。
  */
 /**
- * 本系统**如实提供**的隔离级别（见 [docs/compatibility.md](../../../../../../../docs/compatibility.md) §4.1：
+ * 本系统**如实提供**的隔离级别（见 [docs/zh/compatibility.md](../../../../../../../docs/zh/compatibility.md) §4.1：
  * 实现是快照隔离，对外报告这一档）。
  *
  * 请求落在这里面不算降级；落在外面（`READ COMMITTED` / `READ UNCOMMITTED`）会被记进
@@ -1641,7 +1646,7 @@ class Executor(private val engine: DatabaseEngine) {
         // INSERT 会被静默截断。现在读侧已经重组（Packets.readPacket），
         // 上限就是这里报的这个值
         
-        put("commit_mode", Datum.Str(session.commitMode))
+        put("commit_mode", Datum.Str(engine.commitMode.name.lowercase()))
         put("version", Datum.Str(ServerInfo.VERSION))
         put("version_comment", Datum.Str(ServerInfo.VERSION_COMMENT))
         // 如实回报**会话的**字符集，而不是写死 utf8mb4：
@@ -4131,7 +4136,7 @@ class Executor(private val engine: DatabaseEngine) {
         }
         "VARIABLES" -> {
             val vars = listOf(
-                listOf(Datum.Str("commit_mode"), Datum.Str(session.commitMode)),
+                listOf(Datum.Str("commit_mode"), Datum.Str(engine.commitMode.name.lowercase())),
                 listOf(Datum.Str("autocommit"), Datum.Str(if (session.autocommit) "ON" else "OFF")),
                 listOf(Datum.Str("innodb_lock_wait_timeout"), Datum.I64(session.lockWaitMillis / 1000)),
                 listOf(Datum.Str("transaction_isolation"), Datum.Str("REPEATABLE-READ")),

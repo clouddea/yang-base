@@ -353,10 +353,18 @@ class IoBudgetIntegrationTest {
             c.st { s ->
                 s.execute("DROP TABLE IF EXISTS probe_outer")
                 s.execute("CREATE TABLE probe_outer (id BIGINT NOT NULL, k INT, PRIMARY KEY (id))")
-                // 200 行，每行的 k 命中内层的 20 行（n = id % 50）
-                (0 until 200).forEach { i ->
-                    s.execute("INSERT INTO probe_outer VALUES (${i + 1}, ${i % 50})")
-                }
+                // 200 行**一条语句**：准备数据不该被算进被测成本。
+                //
+                // 原来这里是 200 条独立的 `INSERT`，也就是 200 个 autocommit 事务，每个都要等
+                // WAL 落到对象存储。内嵌存储上这是 200 × 亚毫秒（看不见），而真实后端上是
+                // 200 × 一次完整往返——2026-10-26 的 CI 上这个用例因此跑了 **6.2 分钟**，
+                // 占了整个 io-budget 分片（22 分钟）的近三分之一，而它真正要测的东西
+                // （相关子查询只扫内层一次）一秒就完了。组提交救不了它：组提交只摊**并发**
+                // 事务，串行的一条也摊不到。
+                s.execute(
+                    "INSERT INTO probe_outer VALUES " +
+                        (0 until 200).joinToString(",") { i -> "(${i + 1}, ${i % 50})" }
+                )
             }
             flush()
         }

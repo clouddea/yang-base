@@ -1,16 +1,21 @@
 package com.cloudea.yangbase.server
 
+import java.io.DataInputStream
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.file.Files
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.Statement
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /**
  * **`mysqldump` / `mysql` 这类标准 MySQL 工具的兼容面**。
@@ -28,6 +33,141 @@ import kotlin.test.assertTrue
  * 所以这里逐条盯住"工具要求什么"，而不是"我们实现了什么"。
  */
 class MysqldumpCompatTest {
+
+    /**
+     * 用原始 socket 做一次「服务器会不会主动打招呼」的探针。
+     *
+     * 「端口在监听」与「能服务」是两件事：`ServerSocket.bind` 成功之后、
+     * accept 循环真正跑起来之前，内核照样会替你把连接排进 backlog。
+     * 客户端连上去、然后**等一个永远不来的问候包**——这正是 CI 上
+     * 「0 输出、120s 不退出」的样子，而本地因为机器快，窗口太窄从不复现。
+     *
+     * 把这条探针放在启动 `mysql` 客户端之前，是为了在客户端挂住的那一刻
+     * **能分清责任方**：探针过了 → 服务端是好的，问题在客户端侧；
+     * 探针超时 → 就是服务端没准备好，这件事与测试无关，是产品缺陷。
+     */
+    private fun probeGreeting(port: Int, timeoutMs: Int = 5_000): String {
+        Socket().use { s ->
+            s.soTimeout = timeoutMs
+            s.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
+            val ins = DataInputStream(s.getInputStream())
+            val lenBytes = ByteArray(3).also { ins.readFully(it) }
+            val len = (lenBytes[0].toInt() and 0xFF) or
+                ((lenBytes[1].toInt() and 0xFF) shl 8) or
+                ((lenBytes[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte() // sequence id，首包恒为 0
+            val payload = ByteArray(len).also { ins.readFully(it) }
+            check(payload.isNotEmpty() && payload[0].toInt() == 10) {
+                "首包不是 Protocol::Handshake（期望 0x0a，实得 " +
+                    (payload.firstOrNull()?.let { "0x%02x".format(it) } ?: "空包") + "）"
+            }
+            val nul = payload.indexOfFirst { it == 0.toByte() }
+            val version = if (nul > 1) String(payload, 1, nul - 1, Charsets.US_ASCII) else ""
+            check(version.isNotEmpty()) { "问候包里的 server version 是空的" }
+            return version
+        }
+    }
+
+    /**
+     * 超时那一刻把 JVM 里的**虚拟线程**也 dump 出来。
+     *
+     * 连接处理走的是虚拟线程（`Thread.getAllStackTraces()` 看不见它们），
+     * 而 yb-mysql 的每条连接正好是一个虚拟线程。没有这份转储，
+     * 「客户端在等服务器」与「服务器卡在自己的某一行」只能靠猜。
+     */
+    private fun threadDump(): String = runCatching {
+        val jcmd = File(System.getProperty("java.home"), "bin/jcmd")
+        if (!jcmd.canExecute()) return@runCatching "<找不到 jcmd，跳过线程转储>"
+        // ⚠️ `Thread.dump_to_file` 拒绝覆盖已存在的文件（用 CREATE_NEW 打开），
+        // 而 `File.createTempFile` 恰恰先把文件建出来了——上一版因此拿到一份空转储，
+        // 报错信息里那一节是空的。这里改成「新目录 + 尚不存在的文件名」。
+        val dir = Files.createTempDirectory("yangbase-tdump")
+        val out = File(dir.toFile(), "threads.txt")
+        val p = ProcessBuilder(
+            jcmd.absolutePath,
+            ProcessHandle.current().pid().toString(),
+            "Thread.dump_to_file",
+            "-format=text",
+            out.absolutePath,
+        ).redirectErrorStream(true).start()
+        p.waitFor(20, TimeUnit.SECONDS)
+        val raw = runCatching { out.readText() }.getOrDefault("<读不到转储>")
+        dir.toFile().deleteRecursively()
+        if (raw.isBlank()) return@runCatching "<jcmd 产出了空文件：Thread.dump_to_file 可能拒绝写目标路径>"
+        // 只留与我们有关的线程：截断末尾 N 个字符会把 yb-conn 那一段切掉（第一版就切掉了）。
+        val blocks = raw.split(Regex("(?m)^#\\d+ \""))
+        val keep = blocks.filter { b ->
+            listOf("yb-conn", "yb-mysql", "Atomically", "ForkJoin", "Test worker", "yb-shard").any { b.contains(it) }
+        }
+        if (keep.isEmpty()) raw.takeLast(8_000) else keep.joinToString("\n\n") { "#\"" + it }
+
+    }.getOrElse { "<线程转储失败：${it::class.simpleName}: ${it.message}>" }
+
+    /**
+     * 走**原始协议**发一条 COM_QUERY，返回应答的第一个字节（0x00 = OK、
+     * 0xff = ERR、其他 = 结果集头部）。
+     *
+     * 为什么不用 JDBC：这个用例守的是"服务端必须**回**一个包"，
+     * 而 JDBC 会在更上层把"没回包"包装成超时异常，看不出协议层的问题。
+     * 这里超时就是超时——正是要复现的症状。
+     */
+    private fun rawQuery(port: Int, sql: String, timeoutMs: Int = 5_000): Int {
+        Socket().use { s ->
+            s.soTimeout = timeoutMs
+            s.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
+            val ins = DataInputStream(s.getInputStream())
+            val out = s.getOutputStream()
+
+            // 读问候包（不解析内容，只要把序号对齐）
+            val helloLen = ByteArray(3).also { ins.readFully(it) }
+            val len = (helloLen[0].toInt() and 0xFF) or
+                ((helloLen[1].toInt() and 0xFF) shl 8) or
+                ((helloLen[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte()
+            ins.readFully(ByteArray(len))
+
+            // 握手响应：PROTOCOL_41 | SECURE_CONNECTION | PLUGIN_AUTH，空密码
+            val caps = 0x0200 or 0x8000 or 0x00080000
+            val payload = java.io.ByteArrayOutputStream()
+            fun u32(v: Int) {
+                payload.write(v and 0xFF); payload.write((v ushr 8) and 0xFF)
+                payload.write((v ushr 16) and 0xFF); payload.write((v ushr 24) and 0xFF)
+            }
+            u32(caps); u32(0); payload.write(33)          // utf8_general_ci
+            repeat(23) { payload.write(0) }
+            payload.write("root".toByteArray()); payload.write(0)
+            payload.write(0)                              // auth 长度 = 0（空密码）
+            payload.write("mysql_native_password".toByteArray()); payload.write(0)
+            out.write(frame(payload.toByteArray(), 1))
+
+            val okLen = ByteArray(3).also { ins.readFully(it) }
+            val okBytes = (okLen[0].toInt() and 0xFF) or
+                ((okLen[1].toInt() and 0xFF) shl 8) or
+                ((okLen[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte()
+            ins.readFully(ByteArray(okBytes))
+
+            // COM_QUERY
+            val body = byteArrayOf(0x03) + sql.toByteArray(Charsets.UTF_8)
+            out.write(frame(body, 0))
+            out.flush()
+
+            val rLen = ByteArray(3).also { ins.readFully(it) }
+            val rBytes = (rLen[0].toInt() and 0xFF) or
+                ((rLen[1].toInt() and 0xFF) shl 8) or
+                ((rLen[2].toInt() and 0xFF) shl 16)
+            ins.readUnsignedByte()
+            val resp = ByteArray(rBytes)
+            ins.readFully(resp)
+            return resp[0].toInt() and 0xFF
+        }
+    }
+
+    /** MySQL 包格式：3 字节小端长度 + 1 字节序号 + 载荷。 */
+    private fun frame(payload: ByteArray, seq: Int): ByteArray {
+        val n = payload.size
+        return byteArrayOf((n and 0xFF).toByte(), ((n ushr 8) and 0xFF).toByte(), ((n ushr 16) and 0xFF).toByte(), seq.toByte()) + payload
+    }
 
     private lateinit var dataDir: java.nio.file.Path
     private lateinit var server: YangBaseServer
@@ -182,6 +322,26 @@ class MysqldumpCompatTest {
 
     // ── 工具依赖的会话行为 ────────────────────────────────────────
 
+
+    /**
+     * **纯注释的 COM_QUERY 必须回 OK，不能一声不吭。**
+     *
+     * 这条守的是一个真实故障：`mysql` 客户端导入 mysqldump 产物时整个挂死 120 秒，
+     * 因为 dump 的第一行是 `-- MySQL dump 10.13 …`，而 MySQL 8.4 的客户端会把它
+     * 原样放进 COM_QUERY 发出来。服务端解析出 0 条语句，于是**一个字节也不回**，
+     * 客户端等着一个永远不会来的应答。
+     *
+     * 本地复现不了的原因：8.0 客户端在客户端侧就把注释剥掉了。
+     */
+    @Test
+    fun `只有注释的查询必须回 OK 而不是不回包`() {
+        assertEquals(0x00, rawQuery(port, "-- MySQL dump 10.13  Distrib 8.4.11, for Linux (x86_64)"), "注释查询必须回 OK")
+        assertEquals(0x00, rawQuery(port, "--\n"), "只有换行的注释也必须回 OK")
+        assertEquals(0x00, rawQuery(port, "   "), "空白查询必须回 OK（真实 MySQL 同样如此）")
+        // 顺带确认：正常语句仍然正常
+        assertEquals(0x00 or 0x00, rawQuery(port, "SET @a = 1"), "普通语句仍然要回 OK")
+    }
+
     @Test
     fun `用户变量能存能取且不遮蔽系统变量`() {
         connect().use { c ->
@@ -281,11 +441,72 @@ class MysqldumpCompatTest {
             val server2 = YangBaseServer.forTesting(
                 store = com.cloudea.yangbase.objectstore.LocalFileObjectStore(dir2), port = 0,
             )
+            // 协议级 trace：只在这个用例里打开。
+            // ⚠️ 光靠 stderr 不行：Gradle 默认不把测试进程的 stderr 打进 CI 日志
+            // （断言消息会显示，println/stderr 不会）。所以这里把 System.err 复制一份到文件，
+            // 失败时连同 trace 一起塞进断言消息——客户端挂住时，"服务端收到了哪一步"
+            // 是唯一能定位的线索。
+            val serverTrace = File.createTempFile("yangbase-proto-trace", ".log")
+            val realErr = System.err
+            runCatching {
+                System.setErr(
+                    java.io.PrintStream(
+                        object : java.io.OutputStream() {
+                            private val a = java.io.FileOutputStream(serverTrace, true)
+                            override fun write(b: Int) { realErr.write(b); a.write(b) }
+                            override fun write(b: ByteArray, off: Int, len: Int) {
+                                realErr.write(b, off, len); a.write(b, off, len)
+                            }
+                            override fun flush() { realErr.flush(); a.flush() }
+                        },
+                        true,
+                    ),
+                )
+            }
+            System.setProperty("yb.mysql.trace", "1")
             server2.start()
+            // 「先证明服务端能服务，再让客户端上」：探针失败时立刻断在这里，
+            // 报错指向服务端；探针通过而客户端仍挂 → 责任方是客户端侧。
+            val greeting = probeGreeting(server2.boundPort)
+
+            // 冒烟：先用同一个客户端跑一条 `SELECT 1`。
+            // 这一步把「连不上」与「灌数据时卡住」分开——
+            // 前者是握手/协议问题，后者是某条 SQL 或结果处理的问题。
+            run {
+                val smokeOut = File.createTempFile("yangbase-smoke", ".log")
+                val smoke = ProcessBuilder(
+                    mysqlClient!!.absolutePath, "-h", "127.0.0.1", "-P", "${server2.boundPort}", "-u", "root",
+                    "--password=", "--connect-timeout=10", "--protocol=TCP", "--unbuffered",
+                    "-e", "SELECT 1",
+                ).redirectOutput(smokeOut).redirectErrorStream(true).start()
+                val finished = smoke.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+                val smokeText = runCatching { smokeOut.readText() }.getOrDefault("")
+                smokeOut.delete()
+                if (!finished) runCatching { smoke.destroyForcibly() }
+                assertTrue(
+                    finished && smoke.exitValue() == 0,
+                    "客户端连不上 server2（SELECT 1 冒烟失败）：" +
+                        if (finished) "退出码 ${smoke.exitValue()}，输出：$smokeText"
+                        else "30s 内没有退出，输出：$smokeText",
+                )
+            }
             val restoreOut = File.createTempFile("yangbase-restore", ".log")
             try {
                 val restore = ProcessBuilder(
                     mysqlClient!!.absolutePath, "-h", "127.0.0.1", "-P", "${server2.boundPort}", "-u", "root",
+                    // 显式空密码：不传 -p 时客户端可能反过来**交互式**索要密码，
+                    // 而它从 /dev/tty 读，所以把 dump 喂给 stdin 也解救不了它——
+                    // CI 上就是这样 0 输出、120s 不退出。
+                    "--password=",
+                    // 连不上时 10s 内快速失败并打印原因，而不是挂到测试超时。
+                    "--connect-timeout=10",
+                    // 强制 TCP：不依赖 socket 路径探测，`-h 127.0.0.1` 的行为才确定。
+                    "--protocol=TCP",
+                    // 逐条打印语句，并且**每条都落到磁盘**。少了 `--unbuffered`，
+                    // 输出会卡在 stdio 的 4KB 缓冲里，进程被 kill 时一个字也留不下——
+                    // 上一版就是这么拿到「0 字符输出」的。
+                    "--verbose",
+                    "--unbuffered",
                 )
                     // ⚠️ 输出必须落到**文件**，不能用管道 + readBytes()：
                     // readBytes() 会阻塞到子进程关掉 stdout，且**没有任何超时**。
@@ -295,7 +516,32 @@ class MysqldumpCompatTest {
                     .redirectOutput(restoreOut)
                     .redirectErrorStream(true)
                     .start()
-                assertTrue(restore.waitFor(120, java.util.concurrent.TimeUnit.SECONDS), "恢复超时")
+                // 超时那一刻，客户端的输出是**唯一**的线索：直接断言失败的话，报告里
+                // 只有一句「恢复超时」，看不出它是卡在等服务器响应、卡在某条 SQL 上，
+                // 还是根本没连上。所以先强制结束子进程（否则它会把 stdout 文件继续占着
+                // 写，读到的内容也不稳定），再把能拿到的东西全部塞进断言消息。
+                if (!restore.waitFor(120, java.util.concurrent.TimeUnit.SECONDS)) {
+                    runCatching { restore.destroyForcibly() }
+                    runCatching { restore.waitFor(10, java.util.concurrent.TimeUnit.SECONDS) }
+                    val partial = runCatching { restoreOut.readText() }.getOrDefault("<读取失败>")
+                    fail(
+                        buildString {
+                            appendLine("恢复超时（120s）：mysql 客户端没有退出，已 destroyForcibly()")
+                            appendLine("进程是否存活：${restore.isAlive}")
+                            appendLine("dump 文件：${dump.absolutePath}（${dump.length()} 字节）")
+                            appendLine("server2 握手探针：通过（server version = $greeting）→ 服务端能服务，问题在客户端侧")
+                            appendLine("server2 活跃连接数：${server2.liveMysqlConnections}")
+                            appendLine()
+                            appendLine("──── 服务端协议 trace（最后 6000 字符）────")
+                            appendLine(runCatching { serverTrace.readText() }.getOrDefault("").takeLast(6_000))
+                            appendLine("客户端输出（${partial.length} 字符，取末尾 4000）：")
+                            appendLine(if (partial.isEmpty()) "<空：客户端一个字都没输出>" else partial.takeLast(4_000))
+                            appendLine()
+                            appendLine("──── 服务端线程转储（含虚拟线程，取末尾 12000 字符）────")
+                            append(threadDump().takeLast(12_000))
+                        },
+                    )
+                }
                 val out = restoreOut.readText()
                 assertEquals(0, restore.exitValue(), "恢复失败：$out")
 
@@ -323,6 +569,9 @@ class MysqldumpCompatTest {
                     assertEquals(1L, (c2.value("SELECT COUNT(*) FROM vpaid") as Number).toLong())
                 }
             } finally {
+                System.clearProperty("yb.mysql.trace")
+                runCatching { System.setErr(realErr) }
+                runCatching { serverTrace.delete() }
                 runCatching { server2.stop() }
                 runCatching { dir2.toFile().deleteRecursively() }
                 runCatching { dump.delete() }

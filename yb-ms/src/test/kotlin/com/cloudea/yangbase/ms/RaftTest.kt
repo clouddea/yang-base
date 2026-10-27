@@ -3,10 +3,13 @@ package com.cloudea.yangbase.ms
 import com.cloudea.yangbase.objectstore.MemoryObjectStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -29,6 +32,58 @@ class RaftTest {
     private fun scope() = CoroutineScope(SupervisorJob())
 
     /**
+     * ★ **下台时必须当场失败未确认的写入**（issue #5 的真身）。
+     *
+     * 这个用例守的是一条诊断质量 + 可用性：领导者受理了一笔写入、还没复制给多数派，
+     * 就收到了一个更高任期的 `AppendEntries`（最常见的一次换人）。旧实现在那条路径上
+     * 只把 `role` 改成 FOLLOWER，**不唤醒等待者**——于是调用方挂满整个提交预算
+     * （CI 上是 5000ms）之后才收到「多数派未能确认日志 N」，把人指向网络与共识，
+     * 而真相是「换人了，这笔写入结果未知」。
+     *
+     * 提交预算在这里设成 30s：如果等待者真的靠超时兜底，本用例会超时失败，
+     * 而不是"碰巧也通过"。
+     */
+    @Test
+    fun `领导者下台时未确认的写入立刻失败而不是挂到提交超时`() = runBlocking<Unit> {
+        val store = MemoryObjectStore()
+        val s = scope()
+        val cluster = InProcessMetaCluster.start(
+            3, store, s, electionTimeoutMillis = 300L..600L, commitTimeoutMillis = 30_000,
+        )
+        try {
+            val leader = cluster.awaitLeader()
+            // 跟随者全下线 → 这笔写入凑不齐多数派，只能干等
+            cluster.nodes.filter { it !== leader }.forEach { it.stop() }
+
+            val call = async { leader.handle(MetaRequest.ReserveTimestamp(0, 1)) }
+            // 给它时间走完"进日志 → 落盘 → 注册等待者"
+            delay(500)
+
+            // 更高任期的 AppendEntries：这就是换人时跟随者/新领导者会发来的东西
+            leader.handleRaft(
+                RaftMessage.AppendEntries(
+                    term = 99, leaderId = "ms-9",
+                    prevLogIndex = 0, prevLogTerm = 0, entries = emptyList(), leaderCommit = 0,
+                ),
+            )
+
+            // 3s 足够宽松，而提交预算是 30s：拿不到就说明还在挂
+            val resp = withTimeout(3_000) { call.await() }
+            val err = assertIs<MetaResponse.Error>(resp)
+            assertTrue(
+                err.message.contains("领导者已变更"),
+                "必须说清是换人导致的结果未知，而不是甩一句「多数派未能确认」：${err.message}",
+            )
+            assertTrue(
+                err.message.contains("重试"),
+                "这类请求（分配时间戳/号段/租约）重试是安全的，错误信息必须指路：${err.message}",
+            )
+        } finally {
+            cluster.stopAll()
+        }
+    }
+
+    /**
      * ★ 多数派才能选出领导者。
      *
      * 只启动 2 个节点的集群（quorum = 2）时必须能选出领导者；
@@ -36,7 +91,7 @@ class RaftTest {
      * 已经在任的领导者也无法提交新的日志。
      */
     @Test
-    fun `多数派才能选出领导者并提交`() = runBlocking {
+    fun `多数派才能选出领导者并提交`() = runBlocking<Unit> {
         val store = MemoryObjectStore()
         val s = scope()
         val cluster = InProcessMetaCluster.start(3, store, s, electionTimeoutMillis = 300L..600L)

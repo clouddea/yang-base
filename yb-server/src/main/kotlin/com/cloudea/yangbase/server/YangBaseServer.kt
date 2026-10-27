@@ -97,6 +97,14 @@ class YangBaseServer(
     val metricsBoundPort: Int get() = http?.boundPort ?: -1
 
     /**
+     * 此刻还活着的 MySQL 连接数。
+     *
+     * 对外暴露是为了**排障**：客户端挂住时，"服务端到底有没有收到这条连接"
+     * 决定责任方在客户端还是服务端——这个问题在 CI 上被查了三轮。
+     */
+    val liveMysqlConnections: Int get() = mysql?.liveConnectionCount ?: 0
+
+    /**
      * 按 [ServerConfig.coordMode] 装配协调实现（§4.7 的两种模式 + 单进程模式）。
      *
      * 这个过程里唯一需要小心的是**顺序**：进程内 MS 必须先起来并选出领导者，
@@ -367,13 +375,32 @@ class YangBaseServer(
         }
 
         startCoordination(store)
+
+        val effectiveCommitMode = parseCommitMode(config.commitMode)
+        // ★ RPO > 0 必须**在启动时就喊出来**，而不是等人去翻文档。
+        //
+        // 这个模式的危险在于「写成功了」和「数据真的在」是两件事，而使用者
+        // 看了太多遍文档之后只会记住前半句。所以：启动日志 + 指标 + 兼容性文档
+        // 三处同时说，缺一处就有人会在一次重启后少掉一批数据。
+        if (!effectiveCommitMode.waitForDurability) {
+            System.err.println(
+                "[YangBase] ⚠️⚠️ commit_mode=async：RPO > 0。" +
+                    "已向客户端确认但尚未落盘的写入（上限 ≈ " +
+                    "${com.cloudea.yangbase.storage.ASYNC_UPLOAD_QUEUE} 批 × " +
+                    "${effectiveCommitMode.windowMillis}ms 窗口）在进程崩溃时会丢；" +
+                    "并且 ACK 时对象还没落地，**其它 CN 立刻读看不到**（本 CN 读得到）。" +
+                    "监控看 yb_async_commit_inflight，非零就是当前失效窗口。" +
+                    "不需要这个语义请用 --commit-mode sync（默认）。",
+            )
+        }
+
         engine = DatabaseEngine(
             store = store,
             allowNonAtomicPointerSwitch = config.allowNonAtomicPointerSwitch,
             scope = scope,
             nodeId = config.nodeId,
             cacheBytes = config.cacheBytes,
-            commitMode = parseCommitMode(config.commitMode),
+            commitMode = effectiveCommitMode,
             coordination = coordination,
             diskCache = config.diskCacheDir?.let {
                 com.cloudea.yangbase.storage.DiskCache(java.nio.file.Path.of(it), config.diskCacheBytes)
@@ -555,18 +582,33 @@ class YangBaseServer(
         )
 
         fun buildStore(config: ServerConfig): ObjectStore = when {
-            config.s3Bucket != null -> S3ObjectStore.create(
-                bucket = config.s3Bucket,
-                endpoint = config.s3Endpoint,
-                region = config.s3Region,
-                accessKey = config.s3AccessKey,
-                secretKey = config.s3SecretKey,
-                // 阿里云 OSS 要求三级域名（虚拟主机式），MinIO 要求路径式——见 S3ObjectStore.create
-                pathStyle = if (config.s3Oss) (config.s3PathStyle ?: false) else config.s3PathStyle,
-                // OSS 的原语与 S3 不同：原子创建走 x-oss-forbid-overwrite、没有 ETag CAS。
-                // 声明成 OSS 预设之后，能力探测会**实测**这些声明，而不是相信它们
-                caps = if (config.s3Oss) ObjectStoreCapabilities.OSS else ObjectStoreCapabilities.FULL,
-            )
+            config.s3Bucket != null -> {
+                // 端点/区域/寻址风格/能力声明由预设统一解析：
+                // 显式参数 > 预设默认值（见 S3Provider 的类注释）。
+                // CLI 用的是同一个解析函数，避免「CLI 能连、服务端连不上」这种漂移。
+                val target = com.cloudea.yangbase.objectstore.S3Target.resolve(
+                    providerId = config.s3Provider,
+                    endpoint = config.s3Endpoint,
+                    region = config.s3Region,
+                    pathStyle = config.s3PathStyle,
+                    legacyOssFlag = config.s3Oss,
+                )
+                if (target.endpoint == null && target.provider != com.cloudea.yangbase.objectstore.S3Provider.AWS) {
+                    throw IllegalArgumentException(
+                        "后端『${target.provider.id}』需要显式 --s3-endpoint：" +
+                            target.provider.note,
+                    )
+                }
+                S3ObjectStore.create(
+                    bucket = config.s3Bucket,
+                    endpoint = target.endpoint,
+                    region = target.region,
+                    accessKey = config.s3AccessKey,
+                    secretKey = config.s3SecretKey,
+                    pathStyle = target.pathStyle,
+                    caps = target.caps,
+                )
+            }
             config.dataDir != null -> LocalFileObjectStore(Path.of(config.dataDir))
             else -> throw IllegalArgumentException(
                 "必须指定对象存储后端：--data-dir（本地，仅开发）或 --s3-bucket（生产）"
@@ -614,7 +656,15 @@ data class ServerConfig(
     val allowNonDurableStorage: Boolean = false,
     val s3Bucket: String? = null,
     val s3Endpoint: String? = null,
-    val s3Region: String = "us-east-1",
+    /**
+     * 后端类型预设（`aws` / `minio` / `oss` / `cos` / `obs` / `r2` / `b2`）。
+     *
+     * 它决定三件容易填错、且错了不报错的事：**端点模板、寻址风格、能力声明**。
+     * null = 按 `aws` 处理（标准 S3 语义）；[s3Oss] 仍是它的兼容别名。
+     */
+    val s3Provider: String? = null,
+    /** 区域。null = 用预设的默认区域。 */
+    val s3Region: String? = null,
     val s3AccessKey: String? = null,
     val s3SecretKey: String? = null,
     /** 寻址风格：null = 自动（给了 endpoint 用路径式）；OSS 要显式传 false。 */
@@ -784,7 +834,10 @@ fun main(args: Array<String>) {
               --s3-secret-key <s>  私钥
               --s3-path-style <b>  寻址风格：true=路径式（MinIO 默认如此）/ false=虚拟主机式
                                    （**阿里云 OSS 必须传 false**，它拒绝路径式：SecondLevelDomainForbidden）
-              --s3-oss             后端是阿里云 OSS：改用它的原子创建原语
+              --s3-provider <id>   后端类型预设：aws（默认）/ minio / oss / cos / obs / r2 / b2。
+                                   它决定端点模板、寻址风格与能力声明；显式参数仍然优先。
+                                   cos/obs/r2/b2 **未实测**，先用 conformance 套件验一遍。
+              --s3-oss             （兼容保留）等价于 --s3-provider oss：改用 OSS 的原子创建原语
                                    （x-oss-forbid-overwrite）并如实声明「无 ETag CAS」，
                                    寻址默认切到三级域名
               --i-accept-nonatomic-pointer-switch
@@ -844,7 +897,8 @@ fun main(args: Array<String>) {
         allowNonDurableStorage = opts.containsKey("i-know-this-is-not-durable"),
         s3Bucket = opts["s3-bucket"],
         s3Endpoint = opts["s3-endpoint"],
-        s3Region = opts["s3-region"] ?: "us-east-1",
+        s3Provider = opts["s3-provider"],
+        s3Region = opts["s3-region"],
         s3AccessKey = opts["s3-access-key"],
         s3SecretKey = opts["s3-secret-key"],
         s3PathStyle = opts["s3-path-style"]?.toBooleanStrictOrNull(),
@@ -930,12 +984,9 @@ private fun buildLeaseProvider(
 private fun parseCommitMode(s: String): com.cloudea.yangbase.storage.CommitMode = when (s.lowercase()) {
     "sync" -> com.cloudea.yangbase.storage.CommitMode.SYNC
     "batch" -> com.cloudea.yangbase.storage.CommitMode.BATCH
-    "async" -> throw IllegalArgumentException(
-        "commit_mode=async 尚未实现：它要求「不等 PUT 完成就 ACK」，" +
-            "而当前组提交写者会等待落盘。开启它会得到 RPO=0 的行为却对外声称 RPO>0。" +
-            "见设计文档 §6.3.4。"
-    )
-    else -> throw IllegalArgumentException("未知的 commit_mode '$s'（支持 sync / batch）")
+    // 启动时会在上面打一条显式的 RPO > 0 警告；这里不再重复解释
+    "async" -> com.cloudea.yangbase.storage.CommitMode.ASYNC
+    else -> throw IllegalArgumentException("未知的 commit_mode '$s'（支持 sync / batch / async）")
 }
 
 private fun parseArgs(args: Array<String>): Map<String, String> {

@@ -9,11 +9,14 @@ import com.cloudea.yangbase.common.Varint
 import com.cloudea.yangbase.common.metrics.Metrics
 import com.cloudea.yangbase.objectstore.ObjectKeys
 import com.cloudea.yangbase.objectstore.ObjectStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 
 /** 一次写入操作。value 为 null 表示墓碑（删除）。 */
@@ -315,6 +318,15 @@ enum class CommitMode(val windowMillis: Long, val maxBatchBytes: Int, val waitFo
     /**
      * **必须显式声明**。RPO > 0——崩溃会丢失最多约 100ms 已 ACK 的写入。
      * 开启后 `SHOW VARIABLES LIKE 'commit_mode'` 必须如实返回。
+     *
+     * 语义边界（与 SYNC/BATCH 的差别，全部是**刻意的**）：
+     *  - **ACK 早于落盘**：`submit()` 在 PUT 被**发起**后立即返回 `durable = false`；
+     *    PUT 由后台协程完成，失败会一直重试并计数（不是静默丢弃）。
+     *  - **RPO > 0**：进程崩溃会丢掉「已 ACK 但尚未落盘」的那部分，上限是
+     *    上传队列深度 × 窗口，而不是无限。
+     *  - **跨 CN 可见性晚一个往返**：ACK 时对象还没落地，另一个 CN 立刻读看不到。
+     *    本 CN 内因为 MemTable 在 ACK 前已应用，自己读得到。
+     *    所以它**不是强一致**，是「本 CN 不丢（进程不挂）且可能暂时对外不可见」。
      */
     ASYNC(100, 4 * 1024 * 1024, false),
     ;
@@ -330,6 +342,12 @@ enum class CommitMode(val windowMillis: Long, val maxBatchBytes: Int, val waitFo
 }
 
 class CommitResult(val walSeq: Long, val durable: Boolean)
+
+/**
+ * ASYNC 模式的在途上传队列容量。见 [WalWriter] 里 `uploads` 的注释：
+ * 它同时是「RPO 上界」里的那个乘数。
+ */
+const val ASYNC_UPLOAD_QUEUE = 64
 
 /**
  * WAL 写者 + **组提交**（设计文档 §6.3.4）。
@@ -373,7 +391,41 @@ class WalWriter(
     private var seq = startSeq
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    init {
+        // 部署级语义上报一次：`yb_commit_mode_rpo_gt0` 就是「这个实例答应了你什么」
+        Metrics.setCommitModeRpoGt0(!mode.waitForDurability)
+    }
+
+    /**
+     * ASYNC 模式下「已 ACK、尚未落盘」的一批。
+     *
+     * 只有 [CommitMode.waitForDurability] 为 false 时才会产生——它存在的唯一理由
+     * 就是把 `store.put` 从提交路径上挪到后台，让 ACK 不再等待一个网络往返。
+     */
+    private class Upload(
+        val seq: Long,
+        val key: String,
+        val bytes: ByteArray,
+        val batches: Int,
+        val ops: Long,
+    )
+
+    /**
+     * 上传队列容量 = ASYNC 的**在途窗口上限**。
+     *
+     * 队列满时组提交主循环会挂住（背压），所以 RPO 的上界是
+     * 「队列深度 × 窗口」而不是「无限」；对象存储长时间不可用时表现为写入变慢，
+     * 而不是内存涨到 OOM 或「ACK 了但其实从来没写」。
+     */
+    private val uploads = Channel<Upload>(capacity = ASYNC_UPLOAD_QUEUE)
+
+    /** 已确认落盘的最大序号（ASYNC 下才是 ACK 之后的量；其它模式下等于当前 seq）。 */
+    private val durableSeq = java.util.concurrent.atomic.AtomicLong(startSeq - 1)
+
     val currentSeq: Long get() = seq
+
+    /** 已确认落盘的 WAL 序号。ASYNC 下它与 [currentSeq] 的差距就是「在途量」。 */
+    val durableThroughSeq: Long get() = durableSeq.get()
 
     /**
      * 预留下一个 WAL 序号。
@@ -383,7 +435,12 @@ class WalWriter(
      */
     fun reserveSeq(): Long = seq++
 
-    /** 提交一个事务。**在 [CommitMode.SYNC] / [BATCH] 下，返回即代表已持久化。** */
+    /** 提交一个事务。**只有 [CommitMode.SYNC] / [BATCH] 下返回才代表已持久化。**
+     *
+     * [CommitMode.ASYNC] 下返回值里的 `durable` 恒为 false：那一刻 PUT 已被发起，
+     * 但还没完成。调用方**不得**把 `durable == false` 当成失败（它已经确认了），
+     * 只能当成「RPO > 0 的那部分」。
+     */
     suspend fun submit(batch: WalBatch): CommitResult {
         check(!closed.get()) { "WalWriter 已关闭" }
         val p = Pending(batch, CompletableDeferred(), System.nanoTime())
@@ -393,6 +450,22 @@ class WalWriter(
 
     /** 组提交主循环。由持有租约的写者运行。 */
     fun start(): Job = scope.launch {
+        // ASYNC 才需要一条独立的上传协程；其它模式下 PUT 就在主循环里同步等它。
+        // 注意它是**子协程**：主循环被取消时它一并被取消，不会留一条野协程写对象。
+        val uploader = if (!mode.waitForDurability) launch { uploadLoop() } else null
+        try {
+            commitLoop()
+        } finally {
+            uploads.close()
+            // 收尾时给在途 PUT 一个机会：数据本身不依赖它（flush 会把 MemTable 落成 SST），
+            // 但让它落地能少一次恢复重放。给 30s，超时就取消——**关闭不能被网络卡死**。
+            if (uploader != null) {
+                withTimeoutOrNull(30_000) { uploader.join() } ?: uploader.cancel()
+            }
+        }
+    }
+
+    private suspend fun commitLoop() {
         val pending = ArrayList<Pending>(64)
         var bytes = 0
 
@@ -414,7 +487,7 @@ class WalWriter(
 
             try {
                 // 写之前先确认自己还是写者。这不是性能开销——它只在组提交的
-                // 那一瞬间做一次，而拦下的是"旧写者继续写"这种静默数据错乱。
+                // 那一瞬间做一次，而拦下的是「旧写者继续写」这种静默数据错乱。
                 beforeWrite()
 
                 val mySeq = seq
@@ -423,20 +496,38 @@ class WalWriter(
                 val batches = pending.map { it.batch.copy(seq = mySeq) }
                 val encoded = WalCodec.encode(epoch, mySeq, batches)
                 val key = ObjectKeys.walBatch(shard, epoch, mySeq)
-                store.put(key, encoded)
-
-                // 一次 PUT 摊掉了多少个事务——这就是组提交的全部意义（§6.3.4）。
-                // 摊薄倍数是「写成本」的直接代理：倍数为 1 表示一次写入一次 PUT。
-                Metrics.onGroupCommit(batches.size, batches.sumOf { it.ops.size.toLong() })
-
-                // 持久化成功之后、通知提交者之前，按序应用这批变更
-                onCommitted(batches)
 
                 if (mode.waitForDurability) {
+                    store.put(key, encoded)
+                    durableSeq.set(mySeq)
+
+                    // 一次 PUT 摊掉了多少个事务——这就是组提交的全部意义（§6.3.4）。
+                    // 摊薄倍数是「写成本」的直接代理：倍数为 1 表示一次写入一次 PUT。
+                    Metrics.onGroupCommit(batches.size, batches.sumOf { it.ops.size.toLong() })
+
+                    // 持久化成功之后、通知提交者之前，按序应用这批变更
+                    onCommitted(batches)
+
                     val now = System.nanoTime()
                     for (p in pending) {
                         Metrics.commitDuration.observe((now - p.startedNanos) / 1e9)
                         p.done.complete(CommitResult(mySeq, true))
+                    }
+                } else {
+                    // ★ ASYNC：交出去 → 应用 → ACK。两步顺序都不能反：
+                    //  · `onCommitted` 必须在提交序上执行（行数增量靠它算对）；
+                    //  · 应用必须在 ACK **之前**，否则「已经返回成功的写入自己读不到」。
+                    // 真正的落盘由 uploadLoop 在后面做，失败就重试——不丢给客户端。
+                    uploads.send(
+                        Upload(mySeq, key, encoded, batches.size, batches.sumOf { it.ops.size.toLong() }),
+                    )
+                    Metrics.asyncCommitInFlight()
+                    onCommitted(batches)
+
+                    val now = System.nanoTime()
+                    for (p in pending) {
+                        Metrics.commitDuration.observe((now - p.startedNanos) / 1e9)
+                        p.done.complete(CommitResult(mySeq, durable = false))
                     }
                 }
             } catch (t: Throwable) {
@@ -444,6 +535,44 @@ class WalWriter(
             } finally {
                 pending.clear()
                 bytes = 0
+            }
+        }
+    }
+
+    /**
+     * ASYNC 的后台上传。**按序号顺序**逐批 PUT，一批落盘后才动下一批。
+     *
+     * 为什么失败要无限重试：此刻客户端已经拿到成功了，把这一批扔掉就是
+     * 「静默丢数据」——比让写入变慢坏得多。背压来自 [uploads] 的容量：
+     * 队列满了主循环就挂住、不再 ACK 新的批次，问题会在推迟的延迟上暴露，
+     * 而不是在半个月后的一次重启里。
+     */
+    private suspend fun uploadLoop() {
+        for (u in uploads) {
+            var attempt = 0
+            while (true) {
+                try {
+                    store.put(u.key, u.bytes)
+                    Metrics.onGroupCommit(u.batches, u.ops)
+                    Metrics.asyncCommitDurable()
+                    durableSeq.set(u.seq)
+                    break
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    attempt++
+                    Metrics.asyncCommitPutFailure()
+                    // 关闭时不再无限重试：3 次还不成就算丢（计数 + 严重日志）。
+                    // 这是 RPO > 0 的真实代价，必须能变得**可见**。
+                    if (closed.get() && attempt >= 3) {
+                        Metrics.asyncCommitLost()
+                        System.err.println(
+                            "[yb] 严重: commit_mode=async 关闭前仍有 WAL 对象未落盘，已放弃 ${u.key}：$t",
+                        )
+                        break
+                    }
+                    delay(minOf(2_000L, 50L shl minOf(attempt - 1, 5)))
+                }
             }
         }
     }

@@ -12,7 +12,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * **审查发现项的回归测试**（见 [docs/code-review-2026-09.md](../../../../../../../docs/code-review-2026-09.md)）。
+ * **审查发现项的回归测试**（见 [docs/zh/code-review-2026-09.md](../../../../../../../docs/zh/code-review-2026-09.md)）。
  *
  * 每一条对应一个"不报错但结果不对"或"一直付钱"的缺陷。它们共同的特点是
  * **没有测试就一定会复发**：改动看起来都很小，而症状都指向别处。

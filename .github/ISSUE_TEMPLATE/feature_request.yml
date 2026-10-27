@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        提之前请先搜一下已有 issue，也请看一眼 [docs/compatibility.md](../blob/main/docs/compatibility.md) ——
+        提之前请先搜一下已有 issue，也请看一眼 [docs/zh/compatibility.md](../blob/main/docs/zh/compatibility.md) ——
         有些能力是**明确不做**的（例如本年度不做认证/权限/TLS），提前确认能省双方时间。
 
   - type: dropdown

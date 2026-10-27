@@ -280,7 +280,7 @@ object CapabilityProbe {
         // NOTE：这里曾经还有第 7 项「服务端拼接」（`compose`）。它已从 SPI 中移除——
         // 探测一个没有任何数据路径会用的能力，只会让启动报告多一行噪音。
         // 移除的理由（两层布局没有可原样保留的区间、S3 的 5 MiB 最小片长、
-        // 没有整对象复制的调用点）记在 docs/yangbase-design.md §3.2 的决策记录里。
+        // 没有整对象复制的调用点）记在 docs/zh/yangbase-design.md §3.2 的决策记录里。
 
         // ── 清理 ──────────────────────────────────────────────────
         runCatching { store.listAll(probePrefix).forEach { store.delete(it) } }

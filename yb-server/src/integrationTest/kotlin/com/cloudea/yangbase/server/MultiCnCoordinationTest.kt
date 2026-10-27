@@ -91,6 +91,8 @@ class MultiCnCoordinationTest {
             // 数据跨运行持久化：**必须先清空**，否则上一个用例/上一次运行的
             // catalog 与分片会被当成"已经是这个数据库"的状态，断言全线错位
             wipe(raw)
+            // 量一次真实往返，用它推后面所有的时间预算（见 [rttMillis]）
+            rttMillis = measureRtt(raw)
             counting = CountingObjectStore(raw)
             store = counting
         } else {
@@ -121,11 +123,17 @@ class MultiCnCoordinationTest {
                 serveTcp = true,
                 bindHost = "127.0.0.1",
                 bindPort = ports[i],
-                // ⚠️ 选举超时在线性后端上必须**放大**：MS 的每次追加都是一次真实 PUT
-                // （内存 store 是纳秒级，真实后端是几十毫秒）。超时太小，一次慢复制
-                // 就足以让跟随者发起选举，集群在负载下反复换领导者——不报错，
-                // 只是每次换都丢掉锁表（§4.4）。生产默认值也是这个量级
-                electionTimeoutMillis = if (externalEndpoint != null) 1_500L..3_000L else 200L..400L,
+                // ⚠️ 共识的所有时间预算都必须**跟着后端延迟走**。
+                //
+                // MS 的每次追加都是一次真实 PUT：内存 store 是纳秒级，真实对象存储
+                // 是几十到几百毫秒。预算写死成内嵌存储的量级，症状不是报错而是
+                // “集群一直选领导 / 提交超时 / 租约在写入中途过期”。
+                // 2026-10-26 真实 OSS 上第一轮就是这个：3 个用例分别报
+                // `MS 预留时间戳失败：提交超时（1500ms）` 与 `LeaseLostException`。
+                electionTimeoutMillis = if (externalEndpoint != null)
+                    electionTimeoutForRtt() else 200L..400L,
+                // 客户端等“多数派确认”的预算：一轮提交 = 领导者落盘 + 跟随者落盘 + 两个往返
+                commitTimeoutMillis = if (externalEndpoint != null) maxOf(5_000L, rttMillis * 20) else null,
             )
             runBlocking { node.start() }
             msNodes.add(node)
@@ -140,6 +148,51 @@ class MultiCnCoordinationTest {
         if (keys.isNotEmpty()) println("[MultiCnCoordinationTest] 清理上次残留的 ${keys.size} 个对象")
         for (k in keys) runCatching { target.delete(k) }
     }
+
+    /**
+     * 一次对象存储往返的实测值（毫秒）。内嵌存储上是 0–1，真实 OSS 上是几十到几百。
+     *
+     * 所有时间预算都从它推出来，而不是写一个“看起来够大”的常量：
+     * 常量在内嵌存储上永远不会被撞到（于是测不到真问题），在真实后端上又可能不够
+     * （于是报的错像是共识有缺陷）。
+     */
+    private var rttMillis: Long = 1L
+
+    /** 测一次 PUT + GET + DELETE 的平均单项开销。失败时退化成 1（不阻断测试）。 */
+    private fun measureRtt(target: ObjectStore): Long = runBlocking {
+        runCatching {
+            val samples = (1..3).map {
+                val key = "probe/rtt-${System.nanoTime()}"
+                val t0 = System.nanoTime()
+                target.put(key, ByteArray(8))
+                target.get(key)
+                target.delete(key)
+                (System.nanoTime() - t0) / 1_000_000 / 3
+            }
+            maxOf(1L, samples.sorted()[1])
+        }.getOrDefault(1L)
+    }
+
+    /**
+     * 选举超时：Raft 的经验是“远大于一次往返”（同机部署 10× 就够）。
+     *
+     * 区间的**宽度**也要跟着放大：随机区间是 Raft 唯一防“选票被反复瓜分”的机制，
+     * 宽度小于一次往返就等于没随机（节点抽签的差异被同步开销抹平）。
+     */
+    private fun electionTimeoutForRtt(): LongRange {
+        val lo = maxOf(1_500L, rttMillis * 10)
+        val hi = maxOf(3_000L, rttMillis * 20)
+        return lo..hi
+    }
+
+    /**
+     * 用例里写的时间预算（租约 TTL 等）都是**内嵌存储**的量级。
+     *
+     * 搬到真实后端时必须按往返放大：否则测到的不是“跨 CN 的语义”，而是
+     * “预算不够”——例如 2s 的租约要装下十几次几百毫秒的请求，必然中途过期。
+     */
+    private fun scaledBudget(millis: Long): Long =
+        if (externalEndpoint == null) millis else maxOf(millis, millis * maxOf(1L, rttMillis / 50))
 
     @AfterTest
     fun tearDown() {
@@ -181,7 +234,7 @@ class MultiCnCoordinationTest {
                 coordMode = "ms",
                 msPeers = msPeers,
                 msNodeId = nodeId,          // CN 自己不跑 MS
-                leaseTtlMillis = leaseTtlMillis,
+                leaseTtlMillis = scaledBudget(leaseTtlMillis),
                 tsoBatchMillis = tsoBatchMillis,
                 // OSS 这类后端没有 ETag CAS：写入需要显式接受指针切换的非原子降级
                 allowNonAtomicPointerSwitch = externalOss,
@@ -214,7 +267,7 @@ class MultiCnCoordinationTest {
         sql: String,
         expected: Long,
         what: String,
-        timeoutMillis: Long = 2_000,
+        timeoutMillis: Long = scaledBudget(2_000),
     ) {
         val deadline = System.currentTimeMillis() + timeoutMillis
         var last: Long? = null
