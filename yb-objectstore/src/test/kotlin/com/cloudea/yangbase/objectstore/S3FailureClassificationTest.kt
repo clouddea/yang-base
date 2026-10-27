@@ -77,6 +77,38 @@ class S3FailureClassificationTest {
         assertEquals(0, Metrics.storeRetryCount(StoreOp.PUT_CONDITIONAL, "transient"))
     }
 
+    /**
+     * ★ **同一个 412 状态码，两种完全不同的语义**（issue #8）。
+     *
+     * S3 对 `If-None-Match` 不成立与 `If-Match` 不匹配都返回 412，
+     * 光看状态码无法区分。以前一律归成「前置条件不成立（确定失败）」，
+     * 后果是：manifest 指针 CAS 失败在 S3 上抛的异常与内存/本地 FS 不一致，
+     * 而 `Manifest`/`Lease`/`AutoInc` 里的 fencing 分支接不到它。
+     *
+     * 能区分二者的信息只在**发起请求的那一侧**——所以分类必须看 `precondition`。
+     */
+    @Test
+    fun `If-Match 不匹配是并发冲突，不是确定失败`() = runBlocking {
+        store.put("cas", "v1".toByteArray())
+        val stale = raw.head("cas").etag
+        store.put("cas", "v2".toByteArray(), Precondition.MustMatch(stale)) // 这一下把 etag 换掉了
+
+        val e = assertFailsWith<ConcurrentModificationException> {
+            store.put("cas", "v3".toByteArray(), Precondition.MustMatch(stale))
+        }
+        assertTrue(e.message!!.contains("etag"), e.message)
+    }
+
+    @Test
+    fun `If-Match 撞上不存在的对象仍然报对象不存在`() = runBlocking {
+        // 这种情况下后端返回的是 **404**（不是 412）：既然对象都不在了，
+        // 就没必要把它包成"并发冲突"假装还有救。在 S3 / 内嵌服务器上两边一致，
+        // 而把 404 改写成冲突会让「CURRENT 指针真的没了」这种灾难变成一次无限重试。
+        assertFailsWith<ObjectNotFoundException> {
+            store.put("absent", "v".toByteArray(), Precondition.MustMatch(ETag("nope")))
+        }
+    }
+
     @Test
     fun `404 端到端不被重试`() = runBlocking {
         s3.resetCounters()
@@ -178,7 +210,7 @@ class S3FailureClassificationTest {
     }
 
     @Test
-    fun `409 端到端被识别为冲突而不是普通失败`() = runBlocking {
+    fun `409 端到端被识别为冲突而不是普通失败`() = runBlocking<Unit> {
         s3.injectFailures(1, status = 409)
 
         // 409 = 条件结论未知（有并发写在途）。调用方靠这个**类型**决定
