@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `dev/**` 必须在这里。此前只在 main 上跑，而所有开发都在 dev/* 上，
+    # 于是「直接推到 dev 分支」的提交**从未经过任何检查**——2026-10-27 就发生过一次
+    # （#14 的修复以 `e223970` 直接进 dev/0.1.0，combined status 是 total 0）。
+    # 发布门禁依赖 CI，就必须让 CI 覆盖真正接收提交的分支。
+    branches: [main, 'dev/**']
   pull_request:
   workflow_dispatch:
 
