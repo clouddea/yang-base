@@ -102,6 +102,14 @@ Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibab
   the server really accepts MySQL connections; CI runs the same stack and queries it with a real
   MySQL client.
 
+- **Public benchmark with a regression gate**: four workloads (point lookup, range scan, write,
+  `COUNT(*)`) reported as JSON, cold and warm in separate columns, object-store requests as the
+  first-class metric. `requestsPerOp` / bytes / storage footprint are deterministic and gate a PR
+  at a 5% regression; latency only warns. Numbers in `docs/{en,zh}/benchmarks.md` are generated
+  from the JSON, never hand-copied. Numbers today: one cold point lookup is exactly **1 GET**,
+  cache hit is 0, `COUNT(*)` is **0 GETs**, a single-writer commit is 1 PUT and 16 concurrent
+  writers amortise to 0.068 PUT/txn, and a row costs 50.7 bytes on disk (17.5 data + 33.2 index).
+
 ### Changed
 
 - `version.txt` is the single source of truth for the version number; the release workflow refuses
@@ -113,6 +121,11 @@ Connector/J 9.1), the project's embedded S3-compatible server, MinIO, and Alibab
 
 ### Fixed
 
+- **The embedded S3 server added ~40 ms to every GET**, because the JDK's `HttpServer` enables
+  Nagle by default and the fixture writes headers and body as two small writes — a textbook
+  delayed-ACK stall. It did not just make benchmarks look bad: every read-path integration test
+  paid it. With `sun.net.httpserver.nodelay=true`, a cold point lookup went 42.8 ms → 2.2 ms and a
+  20k-row full scan 9.0 s → 66.7 ms. A ratio test (`GET/PUT < 3×`) guards it.
 - **`DECIMAL` columns lost precision** in `+`, `-`, `*`, `%` — now fixed-point `BigDecimal`
   arithmetic, with tests.
 - **A `COM_QUERY` containing only comments never produced a reply**, leaving the client hung for its
