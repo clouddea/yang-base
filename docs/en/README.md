@@ -8,6 +8,7 @@
 | Document | What it covers |
 |---|---|
 | [getting-started.md](getting-started.md) | Build it, run it against MinIO or local files, execute your first SQL |
+| [user-guide.md](user-guide.md) | The full user guide: data types, SQL surface, functions, transactions, indexes, partitioning, CDC, multi-node, operations CLI, migration checklist |
 | [architecture.md](architecture.md) | How the storage layout, write path, read path, transactions and metadata service fit together |
 | [compatibility.md](compatibility.md) | What MySQL features are supported, what is not, and the traps in between — **read this before migrating** |
 | [backends.md](backends.md) | Supported object stores, the backend contract, and how to verify a new one with the conformance suite |
@@ -18,7 +19,6 @@ The complete design document (3000+ lines, §0–§17 plus four appendices) is m
 
 Also available (Chinese only for now):
 
-- [User guide](../zh/user-guide.md) — DDL, queries, deployment, operations in depth
 - [Index benchmarks](../zh/index-bench.md) — SQL-level performance gates for every index type
 - [Development process](../zh/development-process.md) — branching model and PR rules
 - [Code review regression list](../zh/code-review-2026-09.md) — 59 findings from a systematic audit, each with "why it happened" and "which test guards it"
