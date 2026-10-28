@@ -90,6 +90,16 @@ docker compose up -d --wait     # YangBase + S3-compatible object storage
 mysql -h 127.0.0.1 -P 3306 -uroot
 ```
 
+Every release is also published as an image (`clouddea/yangbase`), built and smoke-tested from
+Docker Hub on the release tag:
+
+```bash
+docker run --rm -p 3306:3306 clouddea/yangbase:latest   # local-file backend, demo only
+```
+
+That single container is the "does it even start" path — see [`docker-compose.yml`](docker-compose.yml)
+for the durable shape (object storage as the only source of truth).
+
 ```sql
 CREATE DATABASE demo;
 USE demo;

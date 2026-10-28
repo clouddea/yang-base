@@ -6,6 +6,7 @@ name: Release
 #   2. tag 的提交必须在 main 上（发布只能来自 main）
 #   3. 门禁全跑一遍（build + integrationTest），不是复用 PR 的结果
 #   4. GitHub Release 正文来自 CHANGELOG.md 那一段，没有那一段就失败
+#   5. 镜像推到 Docker Hub（clouddea/yangbase），tag = 版本号 / major.minor / latest
 on:
   push:
     tags:
@@ -100,4 +101,114 @@ jobs:
             echo
             echo "- gate: build + integrationTest"
             echo "- artifacts: see the release page"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 镜像 ────────────────────────────────────────────────────────────────
+  # 发布的一个版本必须**能被拉到**，否则「一条命令跑起来」只是源码树里的承诺。
+  # 这里只在 tag 上推，不在每个 PR 上推：Docker Hub 的 tag 是公开且近乎不可撤销的。
+  #
+  # 凭据用仓库 secret（DOCKERHUB_USERNAME / DOCKERHUB_TOKEN）。没有配 secret 时
+  # 整个 job 会安静跳过而不是失败——fork 和本地测试不该因为「没给你的 Docker Hub 密码」而红。
+  image:
+    name: docker · build and push
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Docker Hub credentials
+        id: creds
+        run: |
+          set -euo pipefail
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN 未配置，跳过镜像推送"
+          fi
+
+      - name: Resolve tags
+        if: steps.creds.outputs.present == 'true'
+        id: meta
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          minor="${version%.*}"
+          {
+            echo "version=$version"
+            echo "minor=$minor"
+            echo "tags<<EOF"
+            echo "${DOCKER_USER}/yangbase:${version}"
+            echo "${DOCKER_USER}/yangbase:${minor}"
+            echo "${DOCKER_USER}/yangbase:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "will push: $DOCKER_USER/yangbase:${version}, :${minor}, :latest"
+        env:
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.creds.outputs.present == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.creds.outputs.present == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        if: steps.creds.outputs.present == 'true'
+        id: build
+        with:
+          context: .
+          push: true
+          build-args: |
+            YB_VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the published image actually runs
+        if: steps.creds.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          image="${{ secrets.DOCKERHUB_USERNAME }}/yangbase:${{ steps.meta.outputs.version }}"
+          # 从**远端仓库**拉回来再跑，而不是复用刚构建的本地镜像：
+          # 要证明的是「别人能拉到并且能跑」，不是「我构建出来的东西在本地能跑」。
+          docker pull "$image"
+          docker run -d --name yb-smoke -p 3307:3306 "$image"
+          # 就绪判据是**真的握手成功**，不是「端口 listen」：端口在 docker-proxy 起来时
+          # 就通了，而那时候引擎可能还没 bind（实测这条路上差 3-4 秒）。
+          # 本机实测：`docker exec ... /dev/tcp` 在端口已通时仍然 Connection refused。
+          ok=""
+          for i in $(seq 1 60); do
+            if mysqladmin ping -h127.0.0.1 -P3307 -uroot --protocol=tcp >/dev/null 2>&1; then
+              echo "MySQL handshake OK after ${i}s"; ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::image did not answer a MySQL handshake in 60s"
+            docker logs --tail=50 yb-smoke
+            exit 1
+          fi
+          mysql -h127.0.0.1 -P3307 -uroot --protocol=tcp -e "SELECT 1 AS ok;"
+          docker logs --tail=20 yb-smoke
+          docker rm -f yb-smoke
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Image"
+            if [ "${{ steps.creds.outputs.present }}" = "true" ]; then
+              echo "- \`docker pull ${{ secrets.DOCKERHUB_USERNAME }}/yangbase:${{ steps.meta.outputs.version }}\`"
+              echo "- tags: version / major.minor / latest"
+            else
+              echo "- skipped (no Docker Hub credentials)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

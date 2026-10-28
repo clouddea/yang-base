@@ -89,6 +89,13 @@ docker compose up -d --wait     # YangBase + S3 兼容对象存储
 mysql -h 127.0.0.1 -P 3306 -uroot
 ```
 
+每个正式版本同时发布镜像（`clouddea/yangbase`），由发布 tag 在 CI 里构建、并从 Docker Hub
+拉回来实跑一遍：
+
+```bash
+docker run --rm -p 3306:3306 clouddea/yangbase:latest   # 本地文件后端，仅供演示
+```
+
 ```sql
 CREATE DATABASE demo;
 USE demo;
