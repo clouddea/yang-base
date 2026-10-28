@@ -1,12 +1,12 @@
 {
     "schema": "yangbase-bench/1",
     "label": "baseline-default",
-    "commit": "0f068bc",
+    "commit": "40ffe6a",
     "version": "0.1.0",
     "jdk": "21.0.12.1",
     "backend": "embedded-s3",
     "profile": "default",
-    "startedAt": "2026-10-28T04:39:05.722728941Z",
+    "startedAt": "2026-10-28T08:30:01.956895857Z",
     "dataset": {
         "rows": 20000,
         "seed": 42,
@@ -21,12 +21,12 @@
             "unit": "op",
             "count": 20,
             "latencyUs": {
-                "p50": 44134,
-                "p95": 45629,
-                "p99": 45629,
-                "max": 54012
+                "p50": 2897,
+                "p95": 5593,
+                "p99": 5593,
+                "max": 29396
             },
-            "throughputPerSec": 22.345844399181694,
+            "throughputPerSec": 212.69128922824964,
             "requests": {
                 "get": 20
             },
@@ -40,12 +40,12 @@
             "unit": "op",
             "count": 20,
             "latencyUs": {
-                "p50": 4481,
-                "p95": 6588,
-                "p99": 6588,
-                "max": 162305
+                "p50": 4975,
+                "p95": 6438,
+                "p99": 6438,
+                "max": 166114
             },
-            "throughputPerSec": 80.33773985836457,
+            "throughputPerSec": 75.13543161548691,
             "requests": {
                 "put": 20
             },
@@ -59,12 +59,12 @@
             "unit": "query",
             "count": 1,
             "latencyUs": {
-                "p50": 2,
-                "p95": 2,
-                "p99": 2,
-                "max": 2
+                "p50": 5,
+                "p95": 5,
+                "p99": 5,
+                "max": 5
             },
-            "throughputPerSec": 500000.0,
+            "throughputPerSec": 200000.0,
             "requests": {},
             "requestsPerOp": 0.0,
             "bytesPerOp": 0.0,
@@ -76,12 +76,12 @@
             "unit": "query",
             "count": 1,
             "latencyUs": {
-                "p50": 325,
-                "p95": 325,
-                "p99": 325,
-                "max": 325
+                "p50": 331,
+                "p95": 331,
+                "p99": 331,
+                "max": 331
             },
-            "throughputPerSec": 3076.923076923077,
+            "throughputPerSec": 3021.1480362537764,
             "requests": {},
             "requestsPerOp": 0.0,
             "bytesPerOp": 0.0,
@@ -93,12 +93,12 @@
             "unit": "row",
             "count": 20000,
             "latencyUs": {
-                "p50": 9021884,
-                "p95": 9021884,
-                "p99": 9021884,
-                "max": 9021884
+                "p50": 66667,
+                "p95": 66667,
+                "p99": 66667,
+                "max": 66667
             },
-            "throughputPerSec": 2216.831872367235,
+            "throughputPerSec": 299998.50000749994,
             "requests": {
                 "get_range": 216
             },
@@ -112,12 +112,12 @@
             "unit": "op",
             "count": 500,
             "latencyUs": {
-                "p50": 8,
+                "p50": 9,
                 "p95": 10,
-                "p99": 12,
-                "max": 27
+                "p99": 15,
+                "max": 24
             },
-            "throughputPerSec": 119161.10581506196,
+            "throughputPerSec": 109697.23562966213,
             "requests": {},
             "requestsPerOp": 0.0,
             "bytesPerOp": 0.0,
@@ -129,12 +129,12 @@
             "unit": "op",
             "count": 50,
             "latencyUs": {
-                "p50": 42776,
-                "p95": 43429,
-                "p99": 43512,
-                "max": 48746
+                "p50": 2151,
+                "p95": 2767,
+                "p99": 3049,
+                "max": 8039
             },
-            "throughputPerSec": 23.31636057725713,
+            "throughputPerSec": 433.8093668118482,
             "requests": {
                 "total": 50
             },
@@ -148,12 +148,12 @@
             "unit": "row",
             "count": 10000,
             "latencyUs": {
-                "p50": 763615,
-                "p95": 763615,
-                "p99": 763615,
-                "max": 805204
+                "p50": 18201,
+                "p95": 18201,
+                "p99": 18201,
+                "max": 18391
             },
-            "throughputPerSec": 6364.793020113382,
+            "throughputPerSec": 250000.0,
             "requests": {
                 "get_range": 37
             },
@@ -167,12 +167,12 @@
             "unit": "row",
             "count": 10000,
             "latencyUs": {
-                "p50": 811280,
-                "p95": 811280,
-                "p99": 811280,
-                "max": 4565990
+                "p50": 25437,
+                "p95": 25437,
+                "p99": 25437,
+                "max": 110049
             },
-            "throughputPerSec": 1626.3571340399637,
+            "throughputPerSec": 63284.73066018631,
             "requests": {
                 "get_range": 144
             },
@@ -214,7 +214,7 @@
                 "p99": 0,
                 "max": 0
             },
-            "throughputPerSec": 18274.12149630768,
+            "throughputPerSec": 19550.939480989397,
             "requests": {
                 "put": 217
             },
@@ -228,12 +228,12 @@
             "unit": "txn",
             "count": 1000,
             "latencyUs": {
-                "p50": 650,
-                "p95": 955,
-                "p99": 1251,
-                "max": 2704
+                "p50": 607,
+                "p95": 996,
+                "p99": 1351,
+                "max": 2859
             },
-            "throughputPerSec": 1464.6027484735177,
+            "throughputPerSec": 1518.0012174369763,
             "requests": {
                 "put": 1000
             },
