@@ -1,0 +1,153 @@
+name: Docker
+
+# 发布镜像：把「一条命令跑起来」从源码树里的承诺变成能拉到的东西。
+#
+# 触发点选 `release: published` 而不是 tag push：
+#   - 镜像的前提是**发布真的成立**（tag 校验、门禁、GitHub Release 都过了）；
+#   - 它不参与发布门禁的判定，失败不会让「版本已经发出去但没有镜像」这件事更糟，
+#     可以重跑。
+#
+# 为什么要 `workflow_dispatch` + `dry_run`：
+#   只在 tag 上才能跑的逻辑等于**永远没被测过就上线**。dry_run 会把镜像构建出来、
+#   在本机把容器跑起来握手一次，但不登录、不推送——这样这条流水线本身可以被验证。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不带 v，例如 0.1.0）；留空则取本次 release 的 tag'
+        required: false
+        default: ''
+      dry_run:
+        description: '只构建并本地验证，不登录、不推送（默认 true）'
+        type: boolean
+        default: true
+
+concurrency:
+  group: docker-${{ github.event.release.tag_name || inputs.version || 'manual' }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build · smoke · push
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Docker Hub 用户名不是秘密，但和 token 放一起配能避免「换账号时只改了一半」
+      DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          raw='${{ github.event.release.tag_name || inputs.version }}'
+          version="${raw#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::无法解析版本号（拿到 '$raw'）—— 手动触发时请填 version，例如 0.1.0"
+            exit 1
+          fi
+          declared="$(tr -d '[:space:]' < version.txt)"
+          if [ "$version" != "$declared" ]; then
+            echo "::error::版本 $version 与 version.txt ($declared) 不一致"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "minor=${version%.*}"
+            echo "dry_run=${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$version (version.txt ✔)"
+
+      - name: Check credentials
+        id: creds
+        if: steps.v.outputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+          if [ -n "$DOCKER_USER" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::error::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN 未配置"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: steps.v.outputs.dry_run != 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          # dry_run 时 load 进本地 docker，好让下一步真跑一次
+          load: ${{ steps.v.outputs.dry_run == 'true' }}
+          push: ${{ steps.v.outputs.dry_run != 'true' }}
+          build-args: |
+            YB_VERSION=${{ steps.v.outputs.version }}
+          tags: |
+            clouddea/yangbase:${{ steps.v.outputs.version }}
+            clouddea/yangbase:${{ steps.v.outputs.minor }}
+            clouddea/yangbase:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          image="clouddea/yangbase:${{ steps.v.outputs.version }}"
+
+          # 非 dry_run 时**从远端拉回来**再跑：要证明的是「别人能拉到并且能跑」，
+          # 不是「我构建出来的东西在本地能跑」。
+          if [ "${{ steps.v.outputs.dry_run }}" != "true" ]; then
+            docker pull "$image"
+          fi
+
+          docker run -d --name yb-smoke -p 3307:3306 "$image"
+
+          # 就绪判据是**真的握手成功**，不是「端口 listen」：宿主机端口在 docker-proxy
+          # 起来时就通了，而引擎还要 3-4 秒才 bind，那一刻容器里 `exec 3<>/dev/tcp`
+          # 仍然是 Connection refused（本机实测）。
+          ok=""
+          for i in $(seq 1 60); do
+            if mysqladmin ping -h127.0.0.1 -P3307 -uroot --protocol=tcp >/dev/null 2>&1; then
+              echo "MySQL handshake OK after ${i}s"; ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::image did not answer a MySQL handshake in 60s"
+            docker logs --tail=50 yb-smoke
+            exit 1
+          fi
+          mysql -h127.0.0.1 -P3307 -uroot --protocol=tcp -e "SELECT 1 AS ok;" 
+          docker logs --tail=20 yb-smoke
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f yb-smoke 2>/dev/null || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Image"
+            echo
+            echo "- version: \`${{ steps.v.outputs.version }}\` (dry_run: \`${{ steps.v.outputs.dry_run }}\`)"
+            if [ "${{ steps.v.outputs.dry_run }}" = "true" ]; then
+              echo "- **dry run**：只构建 + 本地握手验证，没有登录、没有推送"
+            else
+              echo "- \`docker pull clouddea/yangbase:${{ steps.v.outputs.version }}\`"
+              echo "- tags: \`${{ steps.v.outputs.version }}\` / \`${{ steps.v.outputs.minor }}\` / \`latest\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
