@@ -92,8 +92,12 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], threshold: float,
 def judge(key: tuple[str, str], name: str, base: float, cur: float, threshold: float,
           hard: bool, noise_floor: float = 0.0) -> Row:
     delta = pct_delta(base, cur)
-    worse = (cur - base) if "latencyUs" in name else (cur - base)
-    exceeded = delta > threshold and abs(worse) >= noise_floor and abs(worse) > 1e-9
+    worse = cur - base
+    # 噪声地板只用来忽略**绝对值很小**的抖动；但相对变化极大的情况（例如 12µs → 40µs）
+    # 即使绝对值不到地板也必须说出来——「小基数上翻三倍」通常是真的退化了。
+    # 硬门禁不受地板影响（它比对的是确定性指标，没有噪声可言）。
+    floor_ok = abs(worse) >= noise_floor or delta >= 2 * threshold
+    exceeded = delta > threshold and floor_ok and abs(worse) > 1e-9
     if exceeded:
         verdict = "REGRESSION" if hard else "warn"
     else:
