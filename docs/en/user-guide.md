@@ -7,7 +7,8 @@
 
 > **Who this is for**: developers and operators putting an application on YangBase.
 > To decide "can this be migrated" first → read [compatibility.md](compatibility.md);
-> to understand "why is it designed this way" → read [yangbase-design.md](yangbase-design.md);
+> to understand "why is it designed this way" → read [architecture.md](architecture.md) (15-minute tour)
+> or the full design document [docs/zh/yangbase-design.md](../zh/yangbase-design.md) (Chinese only);
 > this guide only answers **how to use it**.
 
 ---
