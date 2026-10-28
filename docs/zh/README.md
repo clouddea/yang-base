@@ -14,6 +14,7 @@
 | [yangbase-design.md](yangbase-design.md) | 完整设计文档（3007 行 / §0–§17 + 4 附录） | **已评审确认** v0.1（§16.1 的九项决策，2026-09-23） |
 | [compatibility.md](compatibility.md) | **面向使用者**的兼容性与限制清单（迁移前必读；对应 §11.2 / §11.3） | 随实现持续更新 |
 | [backends.md](backends.md) | 支持哪些对象存储、后端契约是什么、怎么用 conformance 套件实测一个新后端 | 随实测结果更新 |
+| [benchmarks.md](benchmarks.md) | 公开基准：请求数为一等指标、延迟为二等，冷/热分栏。**由生成器产出**，不手改 | 每次跑基准后重新生成 |
 | [user-guide.md](user-guide.md) | **面向使用者**的操作手册（怎么建表、怎么写查询、怎么部署与运维） | 随实现持续更新 |
 | [index-bench.md](index-bench.md) | 全部索引的 SQL 性能门禁、MinIO/OSS 运行方式 | 18 场景，结果与 IO 双重验收 |
 | [development-process.md](development-process.md) | 分支模型与开发流程（任何改动都必须走 PR） | 2026-10-26 生效 |
