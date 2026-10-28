@@ -1,0 +1,245 @@
+{
+    "schema": "yangbase-bench/1",
+    "label": "baseline-default",
+    "commit": "0f068bc",
+    "version": "0.1.0",
+    "jdk": "21.0.12.1",
+    "backend": "embedded-s3",
+    "profile": "default",
+    "startedAt": "2026-10-28T04:39:05.722728941Z",
+    "dataset": {
+        "rows": 20000,
+        "seed": 42,
+        "blockBytes": 4096,
+        "rowBytes": 23,
+        "description": "id BIGINT PK + name VARCHAR(64) + age INT + status VARCHAR(16)，键 1..N，值由键确定性推导（无随机）"
+    },
+    "metrics": [
+        {
+            "workload": "backend-raw",
+            "cache": "get",
+            "unit": "op",
+            "count": 20,
+            "latencyUs": {
+                "p50": 44134,
+                "p95": 45629,
+                "p99": 45629,
+                "max": 54012
+            },
+            "throughputPerSec": 22.345844399181694,
+            "requests": {
+                "get": 20
+            },
+            "requestsPerOp": 1.0,
+            "bytesPerOp": 4096.0,
+            "extra": {}
+        },
+        {
+            "workload": "backend-raw",
+            "cache": "put",
+            "unit": "op",
+            "count": 20,
+            "latencyUs": {
+                "p50": 4481,
+                "p95": 6588,
+                "p99": 6588,
+                "max": 162305
+            },
+            "throughputPerSec": 80.33773985836457,
+            "requests": {
+                "put": 20
+            },
+            "requestsPerOp": 1.0,
+            "bytesPerOp": 0.0,
+            "extra": {}
+        },
+        {
+            "workload": "count-star",
+            "cache": "hit",
+            "unit": "query",
+            "count": 1,
+            "latencyUs": {
+                "p50": 2,
+                "p95": 2,
+                "p99": 2,
+                "max": 2
+            },
+            "throughputPerSec": 500000.0,
+            "requests": {},
+            "requestsPerOp": 0.0,
+            "bytesPerOp": 0.0,
+            "extra": {}
+        },
+        {
+            "workload": "count-star",
+            "cache": "miss",
+            "unit": "query",
+            "count": 1,
+            "latencyUs": {
+                "p50": 325,
+                "p95": 325,
+                "p99": 325,
+                "max": 325
+            },
+            "throughputPerSec": 3076.923076923077,
+            "requests": {},
+            "requestsPerOp": 0.0,
+            "bytesPerOp": 0.0,
+            "extra": {}
+        },
+        {
+            "workload": "full-scan",
+            "cache": "baseline",
+            "unit": "row",
+            "count": 20000,
+            "latencyUs": {
+                "p50": 9021884,
+                "p95": 9021884,
+                "p99": 9021884,
+                "max": 9021884
+            },
+            "throughputPerSec": 2216.831872367235,
+            "requests": {
+                "get_range": 216
+            },
+            "requestsPerOp": 0.0108,
+            "bytesPerOp": 17.4967,
+            "extra": {}
+        },
+        {
+            "workload": "point-lookup",
+            "cache": "hit",
+            "unit": "op",
+            "count": 500,
+            "latencyUs": {
+                "p50": 8,
+                "p95": 10,
+                "p99": 12,
+                "max": 27
+            },
+            "throughputPerSec": 119161.10581506196,
+            "requests": {},
+            "requestsPerOp": 0.0,
+            "bytesPerOp": 0.0,
+            "extra": {}
+        },
+        {
+            "workload": "point-lookup",
+            "cache": "miss",
+            "unit": "op",
+            "count": 50,
+            "latencyUs": {
+                "p50": 42776,
+                "p95": 43429,
+                "p99": 43512,
+                "max": 48746
+            },
+            "throughputPerSec": 23.31636057725713,
+            "requests": {
+                "total": 50
+            },
+            "requestsPerOp": 1.0,
+            "bytesPerOp": 1440.06,
+            "extra": {}
+        },
+        {
+            "workload": "range-scan",
+            "cache": "hit",
+            "unit": "row",
+            "count": 10000,
+            "latencyUs": {
+                "p50": 763615,
+                "p95": 763615,
+                "p99": 763615,
+                "max": 805204
+            },
+            "throughputPerSec": 6364.793020113382,
+            "requests": {
+                "get_range": 37
+            },
+            "requestsPerOp": 0.0037,
+            "bytesPerOp": 5.2826,
+            "extra": {}
+        },
+        {
+            "workload": "range-scan",
+            "cache": "miss",
+            "unit": "row",
+            "count": 10000,
+            "latencyUs": {
+                "p50": 811280,
+                "p95": 811280,
+                "p99": 811280,
+                "max": 4565990
+            },
+            "throughputPerSec": 1626.3571340399637,
+            "requests": {
+                "get_range": 144
+            },
+            "requestsPerOp": 0.0144,
+            "bytesPerOp": 20.8125,
+            "extra": {}
+        },
+        {
+            "workload": "storage",
+            "cache": "on-disk",
+            "unit": "byte",
+            "count": 20000,
+            "latencyUs": {
+                "p50": 0,
+                "p95": 0,
+                "p99": 0,
+                "max": 0
+            },
+            "throughputPerSec": 0.0,
+            "requests": {},
+            "requestsPerOp": 0.0,
+            "bytesPerOp": 50.6579,
+            "extra": {
+                "dataBytes": 349844.0,
+                "indexBytes": 663314.0,
+                "indexRatio": 1.8960279438835594,
+                "bytesPerRow": 50.6579,
+                "dataBytesPerRow": 17.4922
+            }
+        },
+        {
+            "workload": "write",
+            "cache": "concurrent-16w",
+            "unit": "txn",
+            "count": 3200,
+            "latencyUs": {
+                "p50": 0,
+                "p95": 0,
+                "p99": 0,
+                "max": 0
+            },
+            "throughputPerSec": 18274.12149630768,
+            "requests": {
+                "put": 217
+            },
+            "requestsPerOp": 0.0678125,
+            "bytesPerOp": 0.0,
+            "extra": {}
+        },
+        {
+            "workload": "write",
+            "cache": "single-writer",
+            "unit": "txn",
+            "count": 1000,
+            "latencyUs": {
+                "p50": 650,
+                "p95": 955,
+                "p99": 1251,
+                "max": 2704
+            },
+            "throughputPerSec": 1464.6027484735177,
+            "requests": {
+                "put": 1000
+            },
+            "requestsPerOp": 1.0,
+            "bytesPerOp": 0.0,
+            "extra": {}
+        }
+    ]
+}

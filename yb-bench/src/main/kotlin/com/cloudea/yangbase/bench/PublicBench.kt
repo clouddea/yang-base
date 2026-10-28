@@ -254,6 +254,17 @@ private suspend fun prepare(store: CountingObjectStore, ds: Profile, partition: 
     lsm.close()
 }
 
+/**
+ * 阶段进度打到 stderr。
+ *
+ * 不打印阶段的话，长跑卡住时**无法判断卡在哪一段**——2026-10-28 的 default 档
+ * 就出现过「所有线程空闲、main 在 runBlocking 里等」的死等，最后只能靠猜。
+ */
+private fun phase(name: String) {
+    System.err.println("[bench] phase=$name")
+    System.err.flush()
+}
+
 // ── 负载 0：后端基线（夹具成本，不是引擎成本）────────────────────
 
 /**
@@ -265,6 +276,7 @@ private suspend fun prepare(store: CountingObjectStore, ds: Profile, partition: 
  * 任何优化都不可能低于它。
  */
 private suspend fun backendProbe(store: CountingObjectStore, out: MutableList<Metric>) {
+    phase("backend-raw")
     val putSamples = 20
     val getSamples = 20
     val payload = ByteArray(4096) { (it % 251).toByte() }
@@ -290,6 +302,7 @@ private suspend fun backendProbe(store: CountingObjectStore, out: MutableList<Me
 // ── 负载 1：点查 ───────────────────────────────────────────────────
 
 private suspend fun pointLookup(store: CountingObjectStore, ds: Profile, out: MutableList<Metric>) {
+    phase("point-lookup")
     val keys = IntArray(ds.pointSamples) { 1 + Lcg(Dataset.SEED + it).next(ds.rows) }
 
     // 未命中（严格口径）：**每个样本都新建一个 LsmStore**，BlockCache 是空的，
@@ -338,6 +351,7 @@ private suspend fun pointLookup(store: CountingObjectStore, ds: Profile, out: Mu
 // ── 负载 2：范围扫描 ───────────────────────────────────────────────
 
 private suspend fun rangeScan(store: CountingObjectStore, ds: Profile, out: MutableList<Metric>) {
+    phase("range-scan")
     val rowsPerScan = ds.rows / 2
 
     var lsm = newLsm(store, 2)
@@ -376,6 +390,7 @@ private suspend fun rangeScan(store: CountingObjectStore, ds: Profile, out: Muta
 // ── 负载 3：写入 ───────────────────────────────────────────────────
 
 private suspend fun writePath(store: CountingObjectStore, ds: Profile, out: MutableList<Metric>) {
+    phase("write")
     // 单写者：测组提交把 N 个事务摊成多少次 PUT
     var lsm = newLsm(store, 3)
     lsm.open()
@@ -432,6 +447,7 @@ private suspend fun writePath(store: CountingObjectStore, ds: Profile, out: Muta
 // ── 负载 4：COUNT(*) ──────────────────────────────────────────────
 
 private suspend fun countPath(store: CountingObjectStore, ds: Profile, out: MutableList<Metric>) {
+    phase("count-star")
     val lsm = newLsm(store, 5)
     lsm.open()
     // 用同规模数据（count 的正确性依赖 manifest 行数，与分片内容无关，但规模要一致）
@@ -474,6 +490,7 @@ private suspend fun countPath(store: CountingObjectStore, ds: Profile, out: Muta
 // ── 存储足迹（OKR 2.9 的基线）──────────────────────────────────────
 
 private suspend fun footprint(ds: Profile, out: MutableList<Metric>) {
+    phase("storage")
     // 用内存后端单独测：体积与对象存储后端无关（同一份编码），
     // 但内存后端可以一次拿全键，不会把请求数混进别的负载。
     val mem = com.cloudea.yangbase.objectstore.MemoryObjectStore()
