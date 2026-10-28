@@ -137,6 +137,11 @@ jobs:
             SELECT item, COUNT(*), SUM(amount) FROM t GROUP BY item ORDER BY item;
           "
 
+      # 与发布时**同一段**冒烟脚本（scripts/docker-image-smoke.sh）：
+      # 发布镜像那条流水线只在 tag 上跑，如果这里不跑同一段逻辑，它就是没被测过的代码。
+      - name: Smoke-test the image itself
+        run: scripts/docker-image-smoke.sh yangbase:ci 3308
+
       - name: Logs on failure
         if: failure()
         run: docker compose logs --tail=200

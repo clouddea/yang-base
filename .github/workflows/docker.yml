@@ -112,30 +112,7 @@ jobs:
           if [ "${{ steps.v.outputs.dry_run }}" != "true" ]; then
             docker pull "$image"
           fi
-
-          docker run -d --name yb-smoke -p 3307:3306 "$image"
-
-          # 就绪判据是**真的握手成功**，不是「端口 listen」：宿主机端口在 docker-proxy
-          # 起来时就通了，而引擎还要 3-4 秒才 bind，那一刻容器里 `exec 3<>/dev/tcp`
-          # 仍然是 Connection refused（本机实测）。
-          ok=""
-          for i in $(seq 1 60); do
-            if mysqladmin ping -h127.0.0.1 -P3307 -uroot --protocol=tcp >/dev/null 2>&1; then
-              echo "MySQL handshake OK after ${i}s"; ok=1; break
-            fi
-            sleep 1
-          done
-          if [ -z "$ok" ]; then
-            echo "::error::image did not answer a MySQL handshake in 60s"
-            docker logs --tail=50 yb-smoke
-            exit 1
-          fi
-          mysql -h127.0.0.1 -P3307 -uroot --protocol=tcp -e "SELECT 1 AS ok;" 
-          docker logs --tail=20 yb-smoke
-
-      - name: Clean up
-        if: always()
-        run: docker rm -f yb-smoke 2>/dev/null || true
+          scripts/docker-image-smoke.sh "$image"
 
       - name: Summary
         if: always()
