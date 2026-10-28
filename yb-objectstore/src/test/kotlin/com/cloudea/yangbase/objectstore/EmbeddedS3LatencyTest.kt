@@ -15,8 +15,11 @@ import kotlin.test.assertTrue
  * 10:1 的比例是 Nagle + 延迟 ACK 的签名。后果是冷点查 42.8ms ≈ 全是夹具，
  * 全表扫描 2 万行要 9 秒（216 次 GET × 44ms）。
  *
- * 这条测试不追求精确：它只回答一个问题 —— **夹具是不是又变慢了一个数量级**。
- * 阈值 15ms 比健康值（~1-4ms）宽松得多，但比病灶（44ms）低得多。
+ * 这条测试不追求精确：它只回答一个问题 —— **夹具的 GET 是不是又变慢了一个数量级**。
+ *
+ * 判据用**比值**而不是绝对毫秒：病灶的特征是 GET **比 PUT 慢一个数量级**（10:1），
+ * 而机器快慢、CI runner 忙不忙对两者是同比例影响的。第一版写成「GET p50 < 15ms」，
+ * 在 GitHub runner 上就误报了（17ms，但 PUT 也在同一量级，比值健康）。
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class EmbeddedS3LatencyTest {
@@ -72,13 +75,16 @@ class EmbeddedS3LatencyTest {
                 get[i] = (System.nanoTime() - t) / 1000
             }
 
-            val putP50 = put.sorted()[put.size / 2]
+            val putP50 = maxOf(1L, put.sorted()[put.size / 2])
             val getP50 = get.sorted()[get.size / 2]
-            println("裸请求 p50：PUT=${putP50}µs GET=${getP50}µs")
+            val ratio = getP50.toDouble() / putP50
+            println("裸请求 p50：PUT=${putP50}µs GET=${getP50}µs（GET/PUT=${"%.2f".format(ratio)}×）")
 
+            // 病灶时这个比值是 ~11×（44ms vs 4ms）；健康时 ~1×。
             assertTrue(
-                getP50 < 15_000,
-                "裸 GET p50=${getP50}µs，比健康值高一个数量级（issue #33）。" +
+                ratio < 3.0,
+                "裸 GET p50=${getP50}µs 是 PUT(${putP50}µs) 的 ${"%.1f".format(ratio)}×，" +
+                    "典型的 Nagle/延迟 ACK 症状（issue #33）。" +
                     "内嵌 S3 服务器的每次请求开销会直接变成所有集成测试与基准的开销。",
             )
         }
