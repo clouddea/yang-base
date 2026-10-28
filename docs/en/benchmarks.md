@@ -52,6 +52,7 @@ Point the harness at a real bucket with `-PYB_S3_ENDPOINT` / `YB_S3_ACCESS_KEY` 
 ## What gates a pull request
 
 - **Hard failure:** `requestsPerOp` / `bytesPerOp` / storage footprint regress by more than 5%. These are deterministic, so a failure there is a real regression.
+- **Exception — concurrent writes:** batch sizes depend on thread scheduling, so the ratio moves between machines without any code change (first CI run: 0.188 → 0.212 with identical code). It is gated by an *invariant* instead: averaged requests per transaction must stay ≤ 1.
 - **Warning only:** p50/p95/p99 latency regresses by more than 5% (with a 200 µs noise floor). Shared CI runners cannot support a hard latency gate; pretending otherwise just gets the gate disabled.
 - **Excluded:** anything that needs a real cloud backend (OSS/COS/OBS/R2/B2 latency profile). Those numbers live in the conformance reports, not here.
 

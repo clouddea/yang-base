@@ -182,12 +182,17 @@ def render(report: dict[str, Any], zh: bool) -> str:
         L(
             "- **Hard failure:** `requestsPerOp` / `bytesPerOp` / storage footprint regress by more than 5%."
             " These are deterministic, so a failure there is a real regression.\n"
+            "- **Exception — concurrent writes:** batch sizes depend on thread scheduling, so the ratio moves"
+            " between machines without any code change (first CI run: 0.188 → 0.212 with identical code)."
+            " It is gated by an *invariant* instead: averaged requests per transaction must stay ≤ 1.\n"
             "- **Warning only:** p50/p95/p99 latency regresses by more than 5% (with a 200 µs noise floor)."
             " Shared CI runners cannot support a hard latency gate; pretending otherwise just gets the gate disabled.\n"
             "- **Excluded:** anything that needs a real cloud backend (OSS/COS/OBS/R2/B2 latency profile)."
             " Those numbers live in the conformance reports, not here.",
             "- **硬失败**：`requestsPerOp` / `bytesPerOp` / 存储足迹回退超过 5%。"
             "这些是确定性指标，回退就是真回退。\n"
+            "- **例外 —— 并发写入**：组提交的批次大小取决于线程调度，代码没变也会在机器之间飘"
+            "（第一次 CI 就撞到 0.188 → 0.212）。所以它改用**不变式**门禁：平均每事务请求数必须 ≤ 1。\n"
             "- **仅告警**：p50/p95/p99 延迟回退超过 5%（下限 200 µs 噪声地板）。"
             "共享 CI 机器撑不起延迟硬门禁，硬做只会让人把门禁关掉。\n"
             "- **不在此页**：需要真实云后端的数字（OSS/COS/OBS/R2/B2 的延迟画像）。"

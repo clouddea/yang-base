@@ -28,6 +28,16 @@ from typing import Any
 
 # 这些键是确定性的：允许的例外必须写进这里，而不是整体放宽阈值
 HARD_KEYS = ("requestsPerOp", "bytesPerOp")
+
+# 并发负载的请求数**不是确定性的**：组提交的批次大小取决于线程调度，
+# 换台机器（或换一次运行）就会不同。第一次 CI 就抓到了：0.188 → 0.212（+13%），
+# 代码一行没改。所以这类指标只告警，改用一个**不变式**来硬门禁：
+# 并发写入的摊薄效果不该差于「一个事务一次 PUT」（即 requestsPerOp ≤ 1）。
+CONCURRENT_PREFIX = "concurrent-"
+INVARIANTS = {
+    # (workload, 指标) -> 上限；超过就是机制失效，不是噪声
+    ("write", "requestsPerOp"): 1.0,
+}
 HARD_EXTRAS = ("indexRatio", "bytesPerRow", "dataBytesPerRow")
 LATENCY_KEYS = ("p50", "p95", "p99")
 
@@ -69,8 +79,9 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], threshold: float,
 
     for key in sorted(set(b) & set(c)):
         mb, mc = b[key], c[key]
+        noisy = mb["cache"].startswith(CONCURRENT_PREFIX)
         for name in HARD_KEYS:
-            rows.append(judge(key, name, mb[name], mc[name], threshold, hard=True))
+            rows.append(judge(key, name, mb[name], mc[name], threshold, hard=not noisy))
         for name in LATENCY_KEYS:
             vb, vc = mb["latencyUs"][name], mc["latencyUs"][name]
             verdict_floor = noise_floor_us
@@ -80,6 +91,16 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], threshold: float,
             if name in mb.get("extra", {}) and name in mc.get("extra", {}):
                 rows.append(judge(key, name, mb["extra"][name], mc["extra"][name],
                                   threshold, hard=True))
+
+    # 不变式：并发写入的平均请求数不得超过 1 次/事务（组提交失效的硬信号）
+    for key, m in sorted(c.items()):
+        limit = INVARIANTS.get(key) if m["cache"].startswith(CONCURRENT_PREFIX) else None
+        if limit is None:
+            continue
+        value = m["requestsPerOp"]
+        rows.append(Row(key[0], key[1], f"invariant {key[1]}<= {limit}", limit, value,
+                        0.0 if value <= limit else 100.0 * (value / limit - 1),
+                        "ok" if value <= limit else "REGRESSION"))
 
     # 只在一边出现的负载是结构变化，必须说出来（否则「删掉一个负载」= 静默变绿）
     for key in sorted(set(b) - set(c)):
