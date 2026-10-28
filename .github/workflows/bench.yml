@@ -1,0 +1,85 @@
+name: Bench
+
+# 基准防回退门禁（OKR 2.5/2.6/2.9）。
+#
+# 只在会改变 IO 行为的路径上触发：跑一次要几分钟，而改文档/改 CI 不会改变基准结果。
+# 判定口径见 scripts/bench-compare.py 的头注释：
+#   - 请求数 / 字节数 / 存储足迹 = 确定性指标，回退 >5% **硬失败**
+#   - 延迟 = 只告警（共享 runner 的噪声撑不起硬门禁）
+
+on:
+  pull_request:
+    paths:
+      - 'yb-storage/**'
+      - 'yb-objectstore/**'
+      - 'yb-common/**'
+      - 'yb-sql/**'
+      - 'yb-index/**'
+      - 'yb-bench/**'
+      - 'scripts/bench-compare.py'
+      - 'scripts/bench-render.py'
+      - 'bench/**'
+      - '.github/workflows/bench.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: bench · regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run public benchmark (ci profile)
+        run: >
+          ./gradlew :yb-bench:benchPublic --no-daemon --console=plain
+          -PYB_BENCH_PROFILE=ci
+          -PYB_BENCH_OUT=bench/current-ci.json
+          -PYB_BENCH_LABEL=pr-${{ github.sha }}
+
+      # 基线是仓库里那份 JSON。请求数与字节数只取决于代码 + 数据集，
+      # 与本机快慢无关，所以「本地生成、CI 对比」不会产生假阳性；
+      # 延迟不在硬门禁里，正是为了这个。
+      - name: Compare against baseline
+        run: |
+          set -euo pipefail
+          python3 scripts/bench-compare.py \
+            --baseline bench/baseline-ci.json \
+            --current bench/current-ci.json \
+            --markdown bench/compare.md \
+            | tee bench/compare.txt
+          cat bench/compare.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render benchmark docs
+        if: always()
+        run: |
+          if [ -f bench/current-ci.json ]; then
+            python3 scripts/bench-render.py --input bench/current-ci.json \
+              --out-en /tmp/benchmarks.en.md --out-zh /tmp/benchmarks.zh.md
+            cat /tmp/benchmarks.en.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            bench/current-ci.json
+            bench/compare.md
+            bench/compare.txt
+          retention-days: 30
+          if-no-files-found: ignore

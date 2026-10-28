@@ -42,6 +42,12 @@ class EmbeddedS3Server(bucket: String = "yangbase-test") {
     val endpoint: String get() = "http://127.0.0.1:$port"
 
     fun start() {
+        // ★ 关掉 Nagle。JDK 的 HttpServer 默认开着 Nagle：头与体分两次写时，
+        // Nagle 会等对端的延迟 ACK（Linux 上 40ms），于是**每次 GET 都稳定多出 40ms**。
+        // 2026-10-28 实测（issue #33）：裸 GET 45095µs → 4065µs，与裸 PUT 同量级。
+        // 这个开销不只是基准难看——所有集成测试的读路径都被它拖慢一个数量级。
+        // 属性是 JVM 级静态量，必须在 HttpServer 类初始化之前设置，所以放在这里。
+        System.setProperty("sun.net.httpserver.nodelay", "true")
         val s = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 128)
         s.executor = Executors.newFixedThreadPool(16) { r ->
             Thread(r, "yb-fake-s3").apply { isDaemon = true }

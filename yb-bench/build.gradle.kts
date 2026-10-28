@@ -53,3 +53,25 @@ tasks.register<JavaExec>("benchIndexes") {
         providers.environmentVariable(key).orNull?.let { environment(key, it) }
     }
 }
+
+// 公开基准：输出机器可比的 JSON（bench/current.json），供 scripts/bench-compare.py
+// 与基线逐项对比。请求数是确定性指标，用于 PR 硬门禁；延迟只做告警。
+tasks.register<JavaExec>("benchPublic") {
+    description = "运行公开基准并输出 JSON（-PYB_BENCH_PROFILE=default|ci -PYB_BENCH_OUT=bench/current.json）"
+    group = "verification"
+    mainClass.set("com.cloudea.yangbase.bench.PublicBenchKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    // 输出路径按仓库根解析（`bench/current.json`），不随 Gradle 的模块工作目录漂移
+    workingDir = rootProject.projectDir
+    jvmArgs("-Xmx2g")
+    systemProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
+    listOf("YB_BENCH_PROFILE", "YB_BENCH_OUT", "YB_BENCH_LABEL", "YB_BENCH_DEBUG").forEach { key ->
+        providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    }
+    listOf("YB_S3_ENDPOINT", "YB_S3_BUCKET").forEach { key ->
+        providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    }
+    listOf("YB_S3_ACCESS_KEY", "YB_S3_SECRET_KEY").forEach { key ->
+        providers.environmentVariable(key).orNull?.let { environment(key, it) }
+    }
+}
