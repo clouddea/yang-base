@@ -3,6 +3,7 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 [![CI](https://github.com/clouddea/yang-base/actions/workflows/ci.yml/badge.svg)](https://github.com/clouddea/yang-base/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-clouddea.github.io%2Fyang--base-0b6bcb.svg)](https://clouddea.github.io/yang-base/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![JDK](https://img.shields.io/badge/JDK-21-orange.svg)](https://adoptium.net/)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1-7F52FF.svg)](https://kotlinlang.org/)
@@ -81,6 +82,35 @@ Object storage is extremely cheap per byte, fully decoupled from compute, and co
 ---
 
 ## Quick start
+
+### 60 seconds, with Docker
+
+```bash
+docker compose up -d --wait     # YangBase + S3-compatible object storage
+mysql -h 127.0.0.1 -P 3306 -uroot
+```
+
+Every release is also published as an image (`clouddea/yangbase`), built and smoke-tested from
+Docker Hub on the release tag:
+
+```bash
+docker run --rm -p 3306:3306 clouddea/yangbase:latest   # local-file backend, demo only
+```
+
+That single container is the "does it even start" path — see [`docker-compose.yml`](docker-compose.yml)
+for the durable shape (object storage as the only source of truth).
+
+```sql
+CREATE DATABASE demo;
+USE demo;
+CREATE TABLE orders (id BIGINT PRIMARY KEY, item VARCHAR(32), amount DECIMAL(10,2));
+INSERT INTO orders VALUES (1,'apple',3.50),(2,'banana',1.20),(3,'apple',4.25);
+SELECT item, COUNT(*), SUM(amount) FROM orders GROUP BY item;
+```
+
+The stack runs the real thing: a stateless compute node, an S3-compatible object store, and the
+engine on top of it — not a local-disk shortcut. Credentials in `docker-compose.yml` are
+**development-only**; this version has no authentication or TLS, so keep it on a trusted network.
 
 ### Build and test
 
@@ -500,7 +530,7 @@ See [CLAUDE.md](CLAUDE.md). The ones easiest to trip over:
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) — it covers the build, the test expectations, and the project rules that are not negotiable (request-count budgets, immutable objects, `.idx`/`.dat` separation). All participants are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Branching model: `feature/*` and `bugfix/*` are branched from `dev/<version>` and squash-merged back into it; `main` is only updated when a release is cut. Details in [Development process](docs/zh/development-process.md) (Chinese).
+Branching model: `feature/*` and `bugfix/*` are branched from `dev/<version>` and squash-merged back into it; `main` is only updated when a release is cut. **A version that has been tagged is frozen — it takes no further commits; new work opens a new version.** One release ships every Friday. Version numbers, the freeze rule and the release gate (no release with a known major defect) are in [docs/en/versioning.md](docs/en/versioning.md); the branch mechanics are in [Development process](docs/zh/development-process.md) (Chinese).
 
 ---
 

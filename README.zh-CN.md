@@ -3,6 +3,7 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 [![CI](https://github.com/clouddea/yang-base/actions/workflows/ci.yml/badge.svg)](https://github.com/clouddea/yang-base/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-clouddea.github.io%2Fyang--base-0b6bcb.svg)](https://clouddea.github.io/yang-base/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![JDK](https://img.shields.io/badge/JDK-21-orange.svg)](https://adoptium.net/)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1-7F52FF.svg)](https://kotlinlang.org/)
@@ -80,6 +81,32 @@
 ---
 
 ## 快速开始
+
+### 60 秒跑起来（Docker）
+
+```bash
+docker compose up -d --wait     # YangBase + S3 兼容对象存储
+mysql -h 127.0.0.1 -P 3306 -uroot
+```
+
+每个正式版本同时发布镜像（`clouddea/yangbase`），由发布 tag 在 CI 里构建、并从 Docker Hub
+拉回来实跑一遍：
+
+```bash
+docker run --rm -p 3306:3306 clouddea/yangbase:latest   # 本地文件后端，仅供演示
+```
+
+```sql
+CREATE DATABASE demo;
+USE demo;
+CREATE TABLE orders (id BIGINT PRIMARY KEY, item VARCHAR(32), amount DECIMAL(10,2));
+INSERT INTO orders VALUES (1,'apple',3.50),(2,'banana',1.20),(3,'apple',4.25);
+SELECT item, COUNT(*), SUM(amount) FROM orders GROUP BY item;
+```
+
+跑的是**真的那套东西**：无状态计算节点 + S3 兼容对象存储 + 架在上面的存储引擎，
+不是本地盘捷径。`docker-compose.yml` 里的凭据仅供开发；这个版本没有认证与 TLS，
+请放在受信网络里。
 
 ### 构建与测试
 
@@ -478,7 +505,7 @@ MySQL 的「分区」与本系统的「分片」天然对齐：`PARTITION BY HAS
 
 欢迎贡献。先看 [CONTRIBUTING.md](docs/zh/CONTRIBUTING.md)——里面写了怎么构建、测试的期望，以及几条不可谈判的项目规则（请求数预算、对象不可变、`.idx`/`.dat` 分离）。所有参与者都要遵守[行为准则](docs/zh/CODE_OF_CONDUCT.md)。
 
-分支模型：`feature/*`、`bugfix/*` 从 `dev/<version>` 切出、squash 合回；`main` 只在发版时更新。详见 [开发流程](docs/zh/development-process.md)。
+分支模型：`feature/*`、`bugfix/*` 从 `dev/<version>` 切出、squash 合回；`main` 只在发版时更新。**已打 tag 的版本分支冻结、不再接受任何提交，新改动一律开新版本**；每周五发一个版本。版本号语义、冻结规则与发布门禁（有已知重大缺陷就不发）见 [版本号与发布策略](docs/zh/versioning.md)，分支操作细节见 [开发流程](docs/zh/development-process.md)。
 
 ---
 

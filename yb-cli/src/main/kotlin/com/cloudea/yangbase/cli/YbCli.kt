@@ -9,6 +9,7 @@ import com.cloudea.yangbase.objectstore.ObjectStoreAuditLog
 import com.cloudea.yangbase.objectstore.S3ObjectStore
 import com.cloudea.yangbase.txn.DatabaseEngine
 import com.cloudea.yangbase.txn.GarbageCollector
+import com.cloudea.yangbase.txn.LeaseManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -147,6 +148,12 @@ object YbCli {
             gc 选项:
               --delete                真正执行删除（默认只打印将要删除的内容）
               --window-hours <n>      安全窗口，默认 24 小时（下限 1 小时，见 --help-why）
+
+            shards 选项:
+              --owner                 多一列：当前写者属主 / epoch / 租约剩余时间。
+                                      数据源是租约对象，**每分片 1 次 GET**，分片多时慎用。
+                                      只对 coord-mode=objectstore 有意义：
+                                      single 模式不开租约，ms 模式的租约在共识状态里
             """.trimIndent()
         )
     }
@@ -405,11 +412,26 @@ object YbCli {
         else -> key.substringBefore('/', key).let { "（其它）$it/" }
     }
 
-    private suspend fun shards(@Suppress("UNUSED_PARAMETER") o: Map<String, String>) {
+    private suspend fun shards(o: Map<String, String>) {
         val store = openStore(o)
         val engine = engineOf(store)
-        println("${"表".padEnd(20)} ${"分片".padStart(6)} ${"文件".padStart(6)} ${"行数".padStart(12)} ${"常驻索引".padStart(12)}")
+        val withOwner = o["owner"] == "true"
+        // 租约快照是**只读**的：
+        //  - `peek` 只发 1 次 GET（`LeaseManager.current` 多一次 head，那是为了拿 CAS 凭据，
+        //    而运维查询不需要凭据）；
+        //  - 用 `yb-cli` 当 holder，但这里永远不会 acquire，所以不会真的抢租约。
+        val leases = if (withOwner) LeaseManager(store, holder = "yb-cli") else null
+
+        println(
+            buildList {
+                add("表".padEnd(20)); add("分片".padStart(6))
+                if (withOwner) { add("属主".padEnd(20)); add("epoch".padStart(6)); add("剩余".padStart(9)) }
+                add("文件".padStart(6)); add("行数".padStart(12)); add("常驻索引".padStart(12))
+            }.joinToString(" "),
+        )
+
         var totalRows = 0L
+        var leased = 0
         for (t in engine.catalog.allTables()) {
             for (shard in engine.allShards(t)) {
                 val lsm = runCatching { engine.shardStore(shard, t) }.getOrNull() ?: continue
@@ -417,14 +439,55 @@ object YbCli {
                 val rows = st.rowCountExact.takeIf { it >= 0 } ?: -1
                 if (rows > 0) totalRows += rows
                 println(
-                    "${t.name.take(20).padEnd(20)} ${shard.partition.value.toString().padStart(6)} " +
-                        "${st.levelFiles.sum().toString().padStart(6)} " +
-                        "${(if (rows >= 0) rows.toString() else "?").padStart(12)} " +
-                        "${"${st.residentIndexBytes / 1024}K".padStart(12)}"
+                    buildList {
+                        add(t.name.take(20).padEnd(20))
+                        add(shard.partition.value.toString().padStart(6))
+                        if (leases != null) {
+                            val snap = leases.peek(shard)
+                            if (snap != null && snap.holder.isNotEmpty()) leased++
+                            addAll(ownerCells(snap))
+                        }
+                        add(st.levelFiles.sum().toString().padStart(6))
+                        add((if (rows >= 0) rows.toString() else "?").padStart(12))
+                        add("${st.residentIndexBytes / 1024}K".padStart(12))
+                    }.joinToString(" "),
                 )
             }
         }
         println("合计行数: $totalRows")
+        if (leases != null) {
+            // 没有租约对象**不等于**没有写者：把“为什么查不到”说清楚，
+            // 否则使用者会把这列的空当成“没人可写”而误判
+            println(
+                "租约对象: $leased 个分片有活着的租约。" +
+                    "查不到可能是：coord-mode=single（不开租约）/ coord-mode=ms" +
+                    "（租约在共识状态里，不在对象存储上）",
+            )
+        }
+    }
+
+    /**
+     * `--owner` 的三列：属主 / epoch / 剩余。
+     *
+     * 三种状态分开表达，因为它们的**行动含义完全不同**：
+     *  - 没有租约对象 → 这个部署不写租约对象（single / ms），不是“没人持租约”；
+     *  - holder 为空 → 上一个写者**主动释放**了（epoch 仍保留，永不重置）；
+     *  - 已过期 → 写者没续上（CN 挂了或网络断了），下一个打开分片的 CN 会抢到。
+     */
+    private fun ownerCells(snap: LeaseManager.LeaseSnapshot?): List<String> = when {
+        snap == null -> listOf("—".padEnd(20), "—".padStart(6), "—".padStart(9))
+        snap.holder.isEmpty() ->
+            listOf("(空闲)".padEnd(20), snap.epoch.toString().padStart(6), "已释放".padStart(9))
+        snap.isExpired() ->
+            listOf(
+                snap.holder.take(20).padEnd(20), snap.epoch.toString().padStart(6),
+                "过期${-snap.remainingMillis() / 1000}s".padStart(9),
+            )
+        else ->
+            listOf(
+                snap.holder.take(20).padEnd(20), snap.epoch.toString().padStart(6),
+                "${snap.remainingMillis() / 1000}s".padStart(9),
+            )
     }
 
     private suspend fun gc(o: Map<String, String>) {

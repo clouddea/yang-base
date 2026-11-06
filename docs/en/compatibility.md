@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase Compatibility and Limitations
 
 [English](compatibility.md) | [简体中文](../zh/compatibility.md)
@@ -315,6 +318,17 @@ They are provided by one interface (`CoordinationService`), with three implement
 The two multi-CN modes have **exactly the same contract** (the same consistency test suite runs against each); the differences are only latency, cost,
 and failure behaviour:
 
+- **Writes must reach the CN that owns the shard; reads do not** (issue #14). Any CN can serve a read
+  of any shard (a read-only shard refreshes the manifest view and incrementally replays the WAL before
+  each read, §4.3), but a shard has at most one writer at a time. A write sent to a CN that does not
+  own the shard **fails explicitly with `1205`** (`ER_LOCK_WAIT_TIMEOUT`: the shard write lease is a
+  mutual-exclusion resource held by somebody else — and that is the code Connector/J and mainstream
+  connection pools classify as **retryable**). The message carries the **owner's node id, its epoch and
+  the remaining TTL**, and since the write has not started, retrying is safe.
+  ⚠️ There is **no server-side forwarding** (one extra hop would double commit latency and hand back
+  the simplicity of "one writer per shard"). The client — or a gateway — has to route writes by shard.
+  Ownership is dynamic (whoever holds the lease writes), so use `yb-cli shards --owner` to ask who owns
+  a shard right now and when that lease expires (it reads the lease objects: 1 `GET` per shard).
 - **`objectstore` has no deadlock detection**: a wait-for graph needs a central node with a global view, and there is none here. Two transactions
   waiting on each other can only wait until `innodb_lock_wait_timeout` expires (1205). `ms` mode reports 1213 immediately.
 - **`ms` loses row locks when the leader changes** (the lock table lives in MS memory; §4.4 decided not to persist it). A lock-holding transaction self-checks before commit,
@@ -569,7 +583,7 @@ A server treating it as default behaviour would be closing that gate on the clie
 > In the table above, **only the last column, "request count", is deterministic** — latency and throughput depend heavily on the environment; switching to real
 > object storage only changes latency (about 4 ms per PUT; on the cloud, another order of magnitude higher) and **never changes request counts**:
 > point lookups at 0.004 requests, `COUNT(*)` at 0, and 14.5× group-commit amortization are architectural properties. For the full backend comparison, see
-> the "Performance (measured)" section of [README](../../README.md).
+> the "Performance (measured)" section of [README](https://github.com/clouddea/yang-base/blob/main/README.md).
 
 **The hot/cold difference is a few tens of times**, which is a physical lower bound of object storage as a data layer;
 no optimization can remove it. Therefore SLOs must be stated in two columns: "cache hit" and "cache miss"
@@ -586,6 +600,7 @@ no optimization can remove it. Therefore SLOs must be stated in two columns: "ca
 | Storage tiering and lifecycle rules | cold data cannot sink automatically | **decided not to do it in the short term (the coming months)**; see the note below. The design doc also warns that archival tiers are almost always a loss |
 | Cross-region read replicas | a single-region failure means unavailability | relies on object storage's own cross-region replication (CRR) |
 | Cross-database JOIN / cross-database transactions | behaviour is undefined | a design gap (§16.3) |
+| No server-side forwarding of shard writes | in a multi-CN deployment the client or gateway has to route writes by shard itself | deliberate: one extra hop would double commit latency and give back the "one writer per shard" simplicity. A write sent to a non-owning CN reports `1205` (retryable) with the **owner node, epoch and remaining lease TTL**; `yb-cli shards --owner` answers who owns a shard. Forwarding is planned in #31 |
 | `GEOMETRY` and spatial functions | not implemented | spatial indexes are out of design scope (§8 has no such indexes) |
 
 ### On Storage Tiering: Not in the Short Term (Decision Record)

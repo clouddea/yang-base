@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase Documentation (English)
 
 [English](README.md) | [简体中文](../zh/README.md)
@@ -5,15 +8,17 @@
 | Document | What it covers |
 |---|---|
 | [getting-started.md](getting-started.md) | Build it, run it against MinIO or local files, execute your first SQL |
+| [user-guide.md](user-guide.md) | The full user guide: data types, SQL surface, functions, transactions, indexes, partitioning, CDC, multi-node, operations CLI, migration checklist |
 | [architecture.md](architecture.md) | How the storage layout, write path, read path, transactions and metadata service fit together |
 | [compatibility.md](compatibility.md) | What MySQL features are supported, what is not, and the traps in between — **read this before migrating** |
 | [backends.md](backends.md) | Supported object stores, the backend contract, and how to verify a new one with the conformance suite |
+| [benchmarks.md](benchmarks.md) | Public benchmark: requests per operation (first-class), latency second, cold and warm reported separately. **Generated** — never hand-edited |
+| [versioning.md](versioning.md) | Version numbers, the weekly release train, the freeze rule, and the release gate — **read this before opening a PR against a release branch** |
 
 The complete design document (3000+ lines, §0–§17 plus four appendices) is maintained in Chinese at [docs/zh/yangbase-design.md](../zh/yangbase-design.md). The English architecture overview summarizes it and cites the relevant sections; where the two disagree, the Chinese document is authoritative.
 
 Also available (Chinese only for now):
 
-- [User guide](../zh/user-guide.md) — DDL, queries, deployment, operations in depth
 - [Index benchmarks](../zh/index-bench.md) — SQL-level performance gates for every index type
 - [Development process](../zh/development-process.md) — branching model and PR rules
 - [Code review regression list](../zh/code-review-2026-09.md) — 59 findings from a systematic audit, each with "why it happened" and "which test guards it"

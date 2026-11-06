@@ -1,3 +1,6 @@
+---
+---
+
 # 索引性能验收
 
 `./gradlew :yb-bench:benchIndexes` 是独立的性能门禁，默认使用内嵌 S3。

@@ -52,3 +52,8 @@ Thumbs.db
 docs/sql-manual/
 yb-server/src/integrationTest/kotlin/com/cloudea/yangbase/server/ManualSqlRegressionIntegrationTest.kt
 yb-server/src/test/kotlin/com/cloudea/yangbase/server/ManualRegressionTest.kt
+
+# ── 基准的当前结果（基线 JSON 要入库，跑出来的不要）───
+bench/current*.json
+bench/compare.md
+bench/compare.txt

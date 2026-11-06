@@ -213,7 +213,13 @@ yang-base/
 >   （见 `RaftConcurrencyStressTest.SlowPutStore`），而不是模拟故障：
 >   把"落盘要几毫秒"如实搬到内存里就够了。
 
-### 版本状态（2026-09）
+### 版本状态
+
+> ⚠️ 下面的清单写于 **2026-09**，之后又落地了不少东西（`commit_mode=async`、批量删除、
+> 七个 `--s3-provider` 预设、后端 conformance 套件、Docker 镜像…）。
+> **面向使用者的当前状态以 [`CHANGELOG.md`](CHANGELOG.md) 为准**；未实现/有限制的清单在
+> `docs/zh/compatibility.md`；版本号语义与发布门禁见 `docs/zh/versioning.md`。
+> 这一节保留为当时的设计达成度记录，不再逐条追新。
 
 **已实现并测试通过**：ObjectStore SPI 与 **3 种后端**（内存 / 本地 FS / S3）
 + 内嵌 S3 **测试服务器**（`EmbeddedS3Server`）+ **3 个装饰器**（计数 / 重试 / 埋点）

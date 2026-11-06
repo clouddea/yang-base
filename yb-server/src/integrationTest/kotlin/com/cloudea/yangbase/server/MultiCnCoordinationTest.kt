@@ -143,10 +143,15 @@ class MultiCnCoordinationTest {
     }
 
     /** 清空桶。真实对象存储会跨运行保留数据，必须显式清理（与 `S3IntegrationTest` 同一做法）。 */
-    private fun wipe(target: ObjectStore) = runBlocking {
+    private fun wipe(target: ObjectStore) = runBlocking<Unit> {
         val keys = target.listAll("")
         if (keys.isNotEmpty()) println("[MultiCnCoordinationTest] 清理上次残留的 ${keys.size} 个对象")
-        for (k in keys) runCatching { target.delete(k) }
+        if (keys.isNotEmpty()) {
+            runCatching { target.deleteBatch(keys) }.onFailure { e ->
+                println("[MultiCnCoordinationTest] 批量删除失败，退回逐个删：${e.message}")
+                keys.forEach { runCatching { target.delete(it) } }
+            }
+        }
     }
 
     /**
@@ -467,6 +472,60 @@ class MultiCnCoordinationTest {
             )
         } finally {
             cn2.stop()
+        }
+    }
+
+    /**
+     * ★ **写入打到非属主 CN：报 1205，且错误里带得出属主是谁**（issue #14）。
+     *
+     * 在此之前这句话是 `runCatching { acquire() }.getOrNull()` 之后的
+     * “写者租约被其他节点持有”——既没有属主标识、也没有到期时间，还不区分
+     * “协调层说别人持有”与“对象存储报错了”。使用者唯一能做的动作就是不抱希望地重试。
+     *
+     * 这条用例把三件事钉住：
+     *  1. 错误码是 **1205**（客户端能确定地把它当可重试）；
+     *  2. 错误文本里出现**属主节点的 id**（不用另查也能定位“该发给谁”）；
+     *  3. 读**不需要**路由：同一个 CN 先能读，写入才失败——否则“多 CN 无状态计算”
+     *     这条设计承诺就被这个错误悄悄推翻了。
+     */
+    @Test
+    fun `写入打到非属主 CN 时报 1205 且错误里带属主`() {
+        // TTL 拉长：本用例要的是“属主还活着”这个稳定前提，不是要测租约过期
+        val cn1 = startCn("cn-owner-1", leaseTtlMillis = 60_000)
+        try {
+            connect(cn1, "own").use { c ->
+                c.exec("CREATE DATABASE IF NOT EXISTS own")
+                c.exec("USE own")
+                c.exec("DROP TABLE IF EXISTS t")
+                c.exec("CREATE TABLE t (id BIGINT NOT NULL, v INT, PRIMARY KEY (id))")
+                c.exec("INSERT INTO t VALUES (1,10),(2,20)")
+            }
+
+            val cn2 = startCn("cn-owner-2", leaseTtlMillis = 60_000)
+            connect(cn2, "own").use { c ->
+                c.exec("USE own")
+                // 读：任意 CN 都能服务（只读分片 + 刷新 manifest 视图）
+                assertEquals(2L, c.queryLong("SELECT COUNT(*) FROM t"), "读不需要路由到属主")
+
+                // 写：必须明确失败，并且说得出属主
+                val e = assertFailsWith<SQLException>("写到非属主分片必须明确失败") {
+                    c.exec("INSERT INTO t VALUES (3,30)")
+                }
+                assertEquals(1205, e.errorCode, "“不是写者”必须报 1205（可重试），实际错误：${e.message}")
+                assertTrue(
+                    e.message!!.contains("cn-owner-1"),
+                    "错误信息里必须带属主节点标识（否则客户端不知道该发给谁）：${e.message}",
+                )
+                assertTrue(
+                    e.message!!.contains("重试"),
+                    "错误信息要告诉使用者“重试是安全的”：${e.message}",
+                )
+
+                // 失败是**真的**失败：属主那边也看不到第 3 行
+                assertEquals(2L, c.queryLong("SELECT COUNT(*) FROM t"))
+            }
+        } finally {
+            runCatching { cn1.stop() }
         }
     }
 

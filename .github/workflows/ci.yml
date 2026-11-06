@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `dev/**` 必须在这里。此前只在 main 上跑，而所有开发都在 dev/* 上，
+    # 于是「直接推到 dev 分支」的提交**从未经过任何检查**——2026-10-27 就发生过一次
+    # （#14 的修复以 `e223970` 直接进 dev/0.1.0，combined status 是 total 0）。
+    # 发布门禁依赖 CI，就必须让 CI 覆盖真正接收提交的分支。
+    branches: [main, 'dev/**']
   pull_request:
   workflow_dispatch:
 
@@ -12,6 +16,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── 冻结分支门禁 ──────────────────────────────────────────────
+  # 已打 tag 的版本分支只读（docs/en/versioning.md §3）。这条 job 让任何
+  # 目标为冻结分支的 PR 直接失败，而不是靠“记得别改”。
+  policy:
+    name: policy · frozen release branches
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject PRs targeting a frozen release branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          f=.github/frozen-branches.txt
+          [ -f "$f" ] || { echo "no frozen list"; exit 0; }
+          frozen=$(grep -vE '^[[:space:]]*(#|$)' "$f" | tr -d '[:space:]' || true)
+          if printf '%s\n' "$frozen" | grep -Fxq "$BASE_REF"; then
+            echo "::error::$BASE_REF is frozen — version $BASE_REF was released. Open a new version branch instead (see docs/en/versioning.md)."
+            exit 1
+          fi
+          echo "base $BASE_REF is not frozen ✔"
+
   # ── 编译 + 单元测试 + 覆盖率门禁 ───────────────────────────────
   # `./gradlew build` 会跑 check → test，并在 :yb-server 上执行
   # koverVerify（分支覆盖率 ≥ 50%，按聚合测量，见 yb-server/build.gradle.kts）
@@ -33,6 +61,13 @@ jobs:
 
       - name: Build, test, verify coverage
         run: ./gradlew build --no-daemon --stacktrace
+
+      # 一个永远不跑但永远绿的测试，比没有测试更糟：它会让「这条路径有覆盖」变成一句谎话。
+      # JUnit 5 对「返回非 void」的方法**静默跳过**，而 Kotlin 的表达式体
+      # `fun x() = runBlocking { … }` 恰好会生成这种签名（最后一个表达式有值就不再是 void）。
+      # 这个坑两天踩了两次（10-26 扫出 3 条，10-27 又在新写的测试里复现 1 条），所以上机器门禁。
+      - name: Reject test methods JUnit would silently skip
+        run: scripts/check-test-methods.sh
 
       # 后端一致性矩阵：**兼容矩阵不是手写的文档**，而是这次 CI 的真实结果。
       # 矩阵由 ObjectStoreConformanceTest 产出（行=后端，列=用例，
@@ -66,6 +101,56 @@ jobs:
             **/build/test-results/**
           retention-days: 7
           if-no-files-found: ignore
+
+  # ── Docker 镜像 + 一条命令起全套 ───────────────────────────────
+  # 这个 job 守的不是“镜像能构建”——那是编译器的事——而是**门面承诺**：
+  # README 顶部那三行命令真的能用，而且能用真 MySQL 客户端查到数据。
+  # 它也是 compose 文件唯一的自动验证：本机 Docker 环境不等于别人的。
+  docker:
+    name: docker · compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t yangbase:ci --build-arg YB_VERSION="$(tr -d '[:space:]' < version.txt)" .
+
+      - name: Bring the stack up
+        env:
+          YB_VERSION: ci
+          YANGBASE_PORT: '3307'
+        run: docker compose up -d --wait
+
+      - name: Query it with a real MySQL client
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h127.0.0.1 -P3307 -uroot --protocol=tcp 2>/dev/null; then break; fi
+            sleep 2
+          done
+          mysql -h127.0.0.1 -P3307 -uroot --protocol=tcp -e "
+            CREATE DATABASE smoke;
+            USE smoke;
+            CREATE TABLE t (id BIGINT PRIMARY KEY, item VARCHAR(32), amount DECIMAL(10,2));
+            INSERT INTO t VALUES (1,'apple',3.50),(2,'apple',4.25),(3,'banana',1.20);
+            SELECT item, COUNT(*), SUM(amount) FROM t GROUP BY item ORDER BY item;
+          "
+
+      # 与发布时**同一段**冒烟脚本（scripts/docker-image-smoke.sh）：
+      # 发布镜像那条流水线只在 tag 上跑，如果这里不跑同一段逻辑，它就是没被测过的代码。
+      - name: Smoke-test the image itself
+        run: scripts/docker-image-smoke.sh yangbase:ci 3308
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        env:
+          YB_VERSION: ci
+        run: docker compose down -v
 
   # ── 集成测试 ──────────────────────────────────────────────────
   # ⚠️ `integrationTest` **不在 build 里**（独立源集），必须单独跑。

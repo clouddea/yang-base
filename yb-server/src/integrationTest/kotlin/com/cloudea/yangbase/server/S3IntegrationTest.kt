@@ -131,10 +131,18 @@ class S3IntegrationTest {
     }
 
     /** 清空 bucket。真实对象存储会跨运行保留数据，必须显式清理。 */
-    private fun wipe(store: com.cloudea.yangbase.objectstore.ObjectStore) = runBlocking {
+    private fun wipe(store: com.cloudea.yangbase.objectstore.ObjectStore) = runBlocking<Unit> {
         val keys = store.listAll("")
         if (keys.isNotEmpty()) println("[S3IntegrationTest] 清理上次残留的 ${keys.size} 个对象")
-        for (k in keys) runCatching { store.delete(k) }
+        // 批量删（一次 1000 键）而不是逐个删：请求数从 2N 降到 ceil(N/1000)，
+        // 直接决定这一片在真实后端上是几分钟还是半小时。
+        // 失败时退回逐个删：一个坏键不该让整批留下。
+        if (keys.isNotEmpty()) {
+            runCatching { store.deleteBatch(keys) }.onFailure { e ->
+                println("[S3IntegrationTest] 批量删除失败，退回逐个删：${e.message}")
+                keys.forEach { runCatching { store.delete(it) } }
+            }
+        }
     }
 
     @AfterTest

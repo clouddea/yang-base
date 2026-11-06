@@ -1,0 +1,91 @@
+# YangBase + S3 兼容对象存储：一条命令起一个**真的**环境。
+#
+#   docker compose up -d --wait
+#   mysql -h 127.0.0.1 -P 3306 -uroot
+#
+# 为什么带对象存储而不是用本地盘：YangBase 的正确性建立在对象存储语义上
+# （条件写、不可变对象、manifest 指针切换、fencing）。本地盘后端只是为了
+# 「先跑起来看看」而存在的降级形态，用它评估这个系统会得出错的结论。
+#
+# 为什么是 SeaweedFS 而不是 MinIO：
+#   MinIO 已经不再提供可匿名拉取的镜像（docker.io 上的 `minio/minio` 已下线，
+#   quay.io 上的仓库要求鉴权），所以「一条命令起 MinIO」在 2026 年已经不是一个
+#   能兑现的承诺。SeaweedFS 是 Apache-2.0、单二进制、镜像公开可拉，而且**实测**
+#   通过了本项目的能力探测：条件创建、ETag CAS、读己之写、LIST 强一致、Range
+#   （见 docs/en/backends.md 的验证流程）。它不是我们的生产推荐清单之外的选项，
+#   但作为 demo 后端完全够用。
+#
+# ⚠️ 这里的凭据是**开发用**的明文常量（见 docker/seaweedfs-s3.json）。
+# 生产请用真正的密钥管理，并按 SECURITY.md 的说明把服务放在受信网络里——
+# 这个版本没有认证与 TLS。
+name: yangbase
+
+services:
+  s3:
+    # 固定 tag：latest 会在某天悄悄变成不兼容的版本，而「昨天还能起」是文档型 demo
+    # 最不该出现的故障。
+    image: chrislusf/seaweedfs:4.51
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+    ports:
+      - "8333:8333"   # S3 API
+    volumes:
+      - s3-data:/data
+      - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # 就绪判据是「S3 端口在应答」，而不是「进程还活着」。
+      # ⚠️ 不能要求 2xx：配了身份之后 `GET /` 返回 **403 AccessDenied**，
+      # 那是合法的 S3 应答（服务在、鉴权在起作用），把它当失败会让依赖它的
+      # 容器永远等不到就绪。
+      test:
+        # ⚠️ `$$` 不是笔误：compose 会拿 `$` 做变量插值，不转义的话
+        # `$code` 会被替换成空串，健康检查就变成一句永远失败的垃圾命令。
+        - CMD-SHELL
+        - "code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8333/); [ \"$$code\" = 200 ] || [ \"$$code\" = 403 ]"
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  yangbase:
+    build:
+      context: .
+      args:
+        YB_VERSION: ${YB_VERSION:-dev}
+    image: yangbase:${YB_VERSION:-dev}
+    depends_on:
+      s3:
+        condition: service_healthy
+    command:
+      - --port
+      - "3306"
+      - --s3-endpoint
+      - http://s3:8333
+      - --s3-bucket
+      - yangbase
+      - --s3-access-key
+      - yangbase
+      - --s3-secret-key
+      - yangbase-dev-secret
+      - --s3-region
+      - us-east-1
+      - --s3-path-style
+      - "true"
+      - --coord-mode
+      - single
+      - --commit-mode
+      - sync
+      - --metrics-port
+      - "9104"
+    ports:
+      # 宿主机端口可覆盖（本机已经跑着 MySQL 时很有用）：
+      #   YANGBASE_PORT=3307 docker compose up -d --wait
+      - "${YANGBASE_PORT:-3306}:3306"
+      - "${YANGBASE_METRICS_PORT:-9104}:9104"
+    stop_grace_period: 40s
+
+volumes:
+  s3-data:

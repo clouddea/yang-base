@@ -261,4 +261,13 @@ class RetryingObjectStore(
     override suspend fun delete(key: String): Boolean =
         retrying(StoreOp.DELETE) { delegate.delete(key) }
 
+    /**
+     * 整批重试。DELETE 幂等，所以重发一个已经部分成功的批量**不会**出错——
+     * 已删掉的键再删一次仍然是不存在，代价只是一次多余请求。
+     * 反过来说，如果把部分成功的批量当成失败、却只重试失败的那几个键，
+     * 就需要把响应里的逐键错误带上来——那是后端内部细节，不是 L1 层的接口形状。
+     */
+    override suspend fun deleteBatch(keys: Collection<String>): Int =
+        retrying(StoreOp.DELETE_BATCH) { delegate.deleteBatch(keys) }
+
 }

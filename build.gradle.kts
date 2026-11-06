@@ -11,7 +11,11 @@ plugins {
 
 allprojects {
     group = "com.cloudea.yangbase"
-    version = "0.1.0-SNAPSHOT"
+    // Single source of truth for the version number: `version.txt` at the repo root.
+    // A release tag must equal it; `.github/workflows/release.yml` and
+    // `scripts/release-preflight.sh` both verify that mechanically, so a build
+    // can never claim a version that was never released.
+    version = rootProject.file("version.txt").readText().trim()
     repositories { mavenCentral() }
 }
 
@@ -43,6 +47,10 @@ subprojects {
         "YB_S3_PATH_STYLE", "YB_S3_OSS",
     )
     tasks.withType<Test>().configureEach {
+        // 内嵌 S3 服务器的固定开销是测试套件的地板（issue #33）：JDK HttpServer 默认
+        // 开 Nagle，小响应会稳定多出 ~40ms。EmbeddedS3Server 自己也会设，但属性是
+        // JVM 级静态量、只读一次，所以这里再兜一层，避免同进程里别的 HttpServer 抢先初始化。
+        systemProperty("sun.net.httpserver.nodelay", "true")
         s3Props.forEach { k ->
             (project.findProperty(k) as String?)?.let { systemProperty(k, it) }
         }

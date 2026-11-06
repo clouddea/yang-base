@@ -1,3 +1,6 @@
+---
+---
+
 # Getting Started
 
 [English](getting-started.md) | [简体中文](../zh/user-guide.md)
@@ -8,6 +11,19 @@ first query in about ten minutes; for the full capability surface read the
 [user guide](../zh/user-guide.md) (Chinese) and [compatibility.md](compatibility.md).
 
 ## 1. Prerequisites
+
+**Option A — Docker only.** No JDK, no Gradle, no object storage to install:
+
+```bash
+docker compose up -d --wait     # YangBase + an S3-compatible object store
+mysql -h 127.0.0.1 -P 3306 -uroot
+```
+
+That is the whole demo: a stateless compute node, an S3-compatible store, and the engine on top.
+Compose reports `healthy` only once the server actually accepts MySQL connections. The credentials in
+`docker-compose.yml` are development-only. Continue with §5 ("First query") from there.
+
+**Option B — build from source.** You need:
 
 | Need | Why |
 |---|---|

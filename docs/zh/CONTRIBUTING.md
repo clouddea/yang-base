@@ -1,6 +1,9 @@
+---
+---
+
 # 参与 YangBase 的开发
 
-[English](../../CONTRIBUTING.md) | [简体中文](CONTRIBUTING.md)
+[English](https://github.com/clouddea/yang-base/blob/main/CONTRIBUTING.md) | [简体中文](CONTRIBUTING.md)
 
 感谢你愿意花时间。这份文档说明我们对贡献的期望、项目怎么构建与测试、以及一个改动如何被合入。
 
@@ -12,10 +15,10 @@ YangBase 是一个**把全部持久状态都放在对象存储上的事务型数
 
 | 你想… | 这样做 |
 |---|---|
-| 报告 bug | 提 [bug report](../../.github/ISSUE_TEMPLATE/bug_report.yml)，带上版本/提交号、对象存储后端、**完整 SQL**、期望结果与实际结果 |
-| 提新功能 | **先**提 [feature request](../../.github/ISSUE_TEMPLATE/feature_request.yml)。没讨论过的大 PR 很难合 |
+| 报告 bug | 提 [bug report](https://github.com/clouddea/yang-base/blob/main/.github/ISSUE_TEMPLATE/bug_report.yml)，带上版本/提交号、对象存储后端、**完整 SQL**、期望结果与实际结果 |
+| 提新功能 | **先**提 [feature request](https://github.com/clouddea/yang-base/blob/main/.github/ISSUE_TEMPLATE/feature_request.yml)。没讨论过的大 PR 很难合 |
 | 提问 | 用 [Discussions](https://github.com/clouddea/yang-base/discussions)，不要开 issue |
-| 报告安全问题 | **不要开公开 issue**，看 [SECURITY.md](../../SECURITY.md) |
+| 报告安全问题 | **不要开公开 issue**，看 [SECURITY.md](https://github.com/clouddea/yang-base/blob/main/SECURITY.md) |
 
 想找第一个任务，挑 `good first issue` 标签的——那些是特意做成自包含的。
 
@@ -119,4 +122,4 @@ scope 用模块名（`yb-sql`、`yb-storage`、`yb-mysql`、`yb-server`…），
 
 ## 7. 许可
 
-YangBase 使用 [Apache-2.0](../../LICENSE)。提交 PR 即表示你同意以同样条款授权你的贡献，不需要签 CLA。
+YangBase 使用 [Apache-2.0](https://github.com/clouddea/yang-base/blob/main/LICENSE)。提交 PR 即表示你同意以同样条款授权你的贡献，不需要签 CLA。

@@ -84,6 +84,21 @@ class CountingObjectStore(
         return r
     }
 
+    /**
+     * 批量删除的请求数必须按**真实发出的 HTTP 请求**计，不能简单计成 1。
+     *
+     * 否则“1001 个键 → 2 个请求”这条断言就成了自证：夹具自己说一个请求就是一个请求。
+     * 口径与后端声明一致：声明了 [ObjectStoreCapabilities.batchDeleteMaxKeys] 的
+     * 按分页算，没声明的就是 N 次单键删除（默认实现走的就是那条路）。
+     */
+    override suspend fun deleteBatch(keys: Collection<String>): Int {
+        val r = delegate.deleteBatch(keys)
+        val max = caps.batchDeleteMaxKeys
+        val requests = if (max > 0) (keys.size + max - 1) / max else keys.size
+        repeat(requests) { record("delete_batch", 0, 0, null) }
+        return r
+    }
+
     override suspend fun list(prefix: String, pageToken: String?, limit: Int): ListPage {
         if (failOnList) throw AssertionError("本测试断言不应发生 LIST，但发生了: prefix=$prefix")
         val page = delegate.list(prefix, pageToken, limit)

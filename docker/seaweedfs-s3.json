@@ -1,0 +1,12 @@
+{
+  "_comment": "开发用凭据，与 docker-compose.yml 里 YangBase 的 --s3-access-key/--s3-secret-key 对应。生产不要用这份。",
+  "identities": [
+    {
+      "name": "yangbase",
+      "credentials": [
+        { "accessKey": "yangbase", "secretKey": "yangbase-dev-secret" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

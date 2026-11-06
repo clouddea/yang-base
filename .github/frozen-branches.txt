@@ -1,0 +1,8 @@
+# 已发布（已打 tag）的版本分支 —— 只读，禁止再提交。
+# 规则见 docs/en/versioning.md §3 与 docs/zh/versioning.md §3。
+#
+# CI 的 `policy · frozen release branches` job 会让**任何目标为这些分支的 PR** 失败。
+# 一行一个分支名，`#` 开头是注释。冻结分支保留 90 天后可以删掉对应行。
+#
+# 例：
+# dev/0.1.0

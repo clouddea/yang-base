@@ -139,6 +139,15 @@ class ObjectStoreConformanceTest {
             assertTrue(s.delete("$p/d"), "第一次删除应返回 true")
             assertFalse(s.delete("$p/d"), "删不存在的对象必须返回 false，而不是抛异常")
         },
+        Check("batch delete") { s, p ->
+            val keys = (1..12).map { "$p/bd/$it" }
+            keys.forEach { s.put(it, it.toByteArray()) }
+            // 多带一个不存在的键：原生批量 API（S3/OSS）会把它也报成已删除，
+            // 默认实现（逐个删）返回真实数量。两种都合法，所以只断言下界。
+            val reported = s.deleteBatch(keys + "$p/bd/missing")
+            keys.forEach { assertFalse(s.exists(it), "批量删除后对象仍然存在：$it") }
+            assertTrue(reported >= keys.size, "返回的已删除数量($reported)小于实际删掉的${keys.size}个")
+        },
         Check("range read") { s, p ->
             val data = "0123456789".toByteArray()
             s.put("$p/r", data)

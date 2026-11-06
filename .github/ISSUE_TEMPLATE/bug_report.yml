@@ -15,7 +15,7 @@ body:
     attributes:
       label: 版本 / commit
       description: 运行 `git rev-parse --short HEAD`，或填写 release 版本号
-      placeholder: "例如 0.1.0-SNAPSHOT @ ac57b27"
+      placeholder: "例如 0.1.0 @ ac57b27"
     validations:
       required: true
 

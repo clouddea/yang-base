@@ -1,0 +1,35 @@
+# GitHub Pages 配置（源码在 docs/，站点根就是 docs/）。
+#
+# 刻意**不用**远程主题（remote_theme）：那需要在构建时从 GitHub 拉另一个仓库，
+# 一旦网络或该仓库变动，站点构建就红——而这个站点存在的意义是"文档有个能分享的入口"，
+# 它不该有自己的可用性依赖。布局与样式都在本仓库里，几十行，够用。
+
+title: YangBase
+description: 一个完全构建在对象存储上的分布式 TP 数据库（MySQL 协议）
+lang: zh-CN
+
+# 让 docs/ 里的相对 Markdown 链接在渲染后仍然可点
+plugins:
+  - jekyll-relative-links
+
+markdown: kramdown
+kramdown:
+  # GFM 输入：表格、删除线、自动链接这些 GitHub 上习惯的写法要能用
+  input: GFM
+  hard_wrap: false
+  syntax_highlighter: rouge
+
+# 默认给每个页面套上站点布局。
+# ⚠️ 只对**有 front matter 的文件**生效：Jekyll 会把没有 front matter 的 .md
+# 当作静态文件原样拷贝（于是它们在站点上是一堆源码）。所以 docs/ 下的 .md 都写了
+# 一个空的 `---/---`。这一条踩过：站点首页生成了，其它页面全没渲染。
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+exclude:
+  # ⚠️ 不要把 sql-manual 里的 .sql / .json 排掉：文档里直接链到它们（那是用例夹具），
+  # 排掉就是人为制造一批 404。它们本来就是公开仓库里的文件。
+  - versioning.md.bak

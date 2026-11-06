@@ -301,6 +301,19 @@ class LsmStore(
      *
      * 续期周期取 TTL 的三分之一：一次续期失败还有两次机会，
      * 不会因为一次网络抖动就把自己判死。
+     *
+     * ## 失败时先「确认」，不要直接自杀
+     *
+     * 曾经的写法是一次 renew 抛异常就 `leaseLost = true` 停写。问题在于
+     * **一次失败的 renew 有两种完全不同的含义**：
+     *
+     *  - 真的被接管了（别人过了 TTL 抢走）→ 必须停写；
+     *  - PUT 已经成功、只是响应丢了 → 我们**仍然是写者**，但本地记的 etag 过期了。
+     *
+     * 第二种情形旧代码会把自己误杀：停写 → 下一次写重新 acquire → 租约对象上
+     * 写的持有者就是自己 → 报「被 'cn-a' 持有」——**被自己持有**，而该分片
+     * 会一直不可写到 TTL 过期。现在先 `confirm()`：还是自己就采纳刷新的凭据，
+     * 继续续期；确实不是自己了才停写，并且把原因区分开写进日志（§12.5）。
      */
     private fun startLeaseRenewal() {
         // 无租约模式下没有东西可续
@@ -309,21 +322,38 @@ class LsmStore(
             while (!leaseLost) {
                 val cur = lease ?: return@launch
                 delay((cur.remainingMillis().coerceAtLeast(0) / 2).coerceAtLeast(200))
-                try {
-                    lease = leaseProvider.renew(lease ?: return@launch)
-                } catch (t: Throwable) {
-                    // ★ 续期失败 = 我们可能已经不是写者了。停止写入，让上层去处理。
-                    //
-                    // 但**绝不能把异常丢掉**：这里曾经是 `catch (_: Throwable)`，
-                    // 于是凭证轮换、代理抖动之后该分片不再续约，而**归因线索已经断了**——
-                    // 直到有人来写这一分片才会收到一个 `LeaseLost`，那时早已无从判断
-                    // 是"被抢走"还是"根本没问出来"。日志 + 计数都要留下（§12.5）。
-                    leaseLost = true
-                    Metrics.onLeaseRenewalFailed()
-                    System.err.println(
-                        "[yb] 警告: 分片 $shard 续租失败，停止写入（${t::class.simpleName}: ${t.message}）",
-                    )
-                    return@launch
+                var attempt = 0
+                while (true) {
+                    try {
+                        lease = leaseProvider.renew(lease ?: return@launch)
+                        break
+                    } catch (t: Throwable) {
+                        // 先问清楚“还是不是我的”，再决定要不要停写
+                        val confirmed = runCatching { leaseProvider.confirm(lease!!) }.getOrNull()
+                        if (confirmed != null) {
+                            // 仍是我们自己的：采纳新凭据（etag 变了、到期时间已推后），继续
+                            lease = confirmed
+                            Metrics.onLeaseRenewRetried()
+                            break
+                        }
+                        val mine = lease
+                        attempt++
+                        val expired = mine == null || mine.isExpired()
+                        if (attempt >= 3 || expired) {
+                            // ★ 停写。但**绝不能把异常丢掉**：这里曾经是 `catch (_: Throwable)`，
+                            // 于是凭证轮换、代理抖动之后该分片不再续约，而**归因线索已经断了**——
+                            // 直到有人来写这一分片才会收到一个 `LeaseLost`，那时早已无从判断
+                            // 是"被抢走"还是"根本没问出来"。日志 + 计数都要留下（§12.5）。
+                            leaseLost = true
+                            Metrics.onLeaseRenewalFailed()
+                            System.err.println(
+                                "[yb] 警告: 分片 $shard 续租失败，停止写入（${t::class.simpleName}: ${t.message}；" +
+                                    "尝试 $attempt 次，租约${if (expired) "已到期" else "尚未到期"}）",
+                            )
+                            return@launch
+                        }
+                        delay(200L * attempt)
+                    }
                 }
             }
         }
@@ -585,16 +615,37 @@ class LsmStore(
      * 变成写者（拿到更大的 epoch）。抢不到时给一句能直接定位的话——
      * 使用者在多 CN 部署下看到的应当是"这个分片现在由别的 CN 写"，
      * 而不是一个 NPE 或者含糊的 IO 错误。
+     *
+     * ## 为什么不把异常吞成 null（issue #14）
+     *
+     * 之前这里是 `runCatching { acquire() }.getOrNull()`，两个问题：
+     *  1. **诊断信息丢了**：`LeaseManager` 明明知道**谁**持有、还有多久到期（它刚从租约对象里读的，
+     *     MS 模式则是共识状态给的），却在这里被吞掉，只留下一句笼统的“被其他节点持有”。
+     *     使用者拿到这句话没法行动：该去哪台机器？等多久？
+     *  2. **坐标错了**：对象存储瞬时故障（超时/5xx）也被归成"不是写者"，
+     *     于是真正的 IO 问题被报成了一个永远不会自愈的伪结论。
+     *
+     * 现在：协调层的异常**原样上抛**，只换错误码（见下）。写入尚未开始（WAL 还没收到这个 batch），
+     * 所以它是一个**确定可重试**的失败。
+     *
+     * ## 为什么是 1205（`ER_LOCK_WAIT_TIMEOUT`）而不是 1105
+     *
+     *  - 语义对得上：分片写权是一个**被别人占着的互斥资源**，1205 正是 MySQL 表达这件事的方式；
+     *  - 客户端能懂：Connector/J 把 1205/1213 映射成可重试的事务异常，HikariCP 等连接池据此重试；
+     *    1105 只是个"未知错误"，任何框架都只能把它当致命错。
+     *  - 不假装是死锁/串行化冲突：SQLState 仍用 `HY000`。用 `40001` 会让客户端以为
+     *    "事务被回滚、可以整体重跑"——而这里事务根本没开始执行，两者对重试的约束不同。
      */
     private suspend fun ensureWriter() {
         if (lease != null && !leaseLost && !readOnlyShard) return
-        val acquired = runCatching { leaseProvider.acquire(shard) }.getOrNull()
-        if (acquired == null) {
+        val acquired = try {
+            leaseProvider.acquire(shard)
+        } catch (e: com.cloudea.yangbase.common.SqlException) {
             throw com.cloudea.yangbase.common.SqlException(
-                com.cloudea.yangbase.common.MySqlErrors.ER_UNKNOWN_ERROR, "HY000",
-                "本节点不是分片 $shard 的写者（写者租约被其他节点持有）。" +
-                    "同一分片任一时刻只能有一个写者（设计文档 §4.3）——" +
-                    "请稍后重试，或把该分片的写入路由到它的属主节点",
+                com.cloudea.yangbase.common.MySqlErrors.ER_LOCK_WAIT_TIMEOUT, "HY000",
+                "本节点不是分片 $shard 的写者：${e.message}。" +
+                    "写入尚未开始，重试是安全的；若始终打不通，说明写请求应当发给属主 CN" +
+                    "（`yb-cli shards --owner` 可查当前属主与到期时间）",
             )
         }
         // 拿到租约：升格成写者。**必须换 epoch 前缀**（`wal/e{epoch}/`），

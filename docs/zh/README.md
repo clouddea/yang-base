@@ -1,3 +1,6 @@
+---
+---
+
 # YangBase 文档（简体中文）
 
 [English](../en/README.md) | [简体中文](README.md)
@@ -11,13 +14,15 @@
 | [yangbase-design.md](yangbase-design.md) | 完整设计文档（3007 行 / §0–§17 + 4 附录） | **已评审确认** v0.1（§16.1 的九项决策，2026-09-23） |
 | [compatibility.md](compatibility.md) | **面向使用者**的兼容性与限制清单（迁移前必读；对应 §11.2 / §11.3） | 随实现持续更新 |
 | [backends.md](backends.md) | 支持哪些对象存储、后端契约是什么、怎么用 conformance 套件实测一个新后端 | 随实测结果更新 |
+| [benchmarks.md](benchmarks.md) | 公开基准：请求数为一等指标、延迟为二等，冷/热分栏。**由生成器产出**，不手改 | 每次跑基准后重新生成 |
 | [user-guide.md](user-guide.md) | **面向使用者**的操作手册（怎么建表、怎么写查询、怎么部署与运维） | 随实现持续更新 |
 | [index-bench.md](index-bench.md) | 全部索引的 SQL 性能门禁、MinIO/OSS 运行方式 | 18 场景，结果与 IO 双重验收 |
 | [development-process.md](development-process.md) | 分支模型与开发流程（任何改动都必须走 PR） | 2026-10-26 生效 |
+| [versioning.md](versioning.md) | 版本号语义、每周发布节奏、冻结规则与发布门禁（**有已知重大缺陷就不发**） | 2026-10-27 生效 |
 | [code-review-2026-09.md](code-review-2026-09.md) | **回归清单**：一次系统性审查的 59 条发现项、每条"当初为什么会发生"与"哪条测试盯着它" | 两轮处置完毕（2026-09-25） |
 
 > 项目当前进度（哪些已实现、哪些还没做）统一维护在
-> [PROJECT_GUIDE.md](../../PROJECT_GUIDE.md) 的「版本状态」一节，本文件不重复。
+> [PROJECT_GUIDE.md](https://github.com/clouddea/yang-base/blob/main/PROJECT_GUIDE.md) 的「版本状态」一节，本文件不重复。
 
 ## 一句话定位
 
@@ -38,7 +43,7 @@
 |---|---|---|
 | D1 | 协调模型 | **双模式，部署时选择**：轻量常驻元数据服务（Raft×3）或纯对象存储 CAS（零常驻成本）——实现现状见下方注 |
 | D3 | 写路径 | 单写者日志流 + LSM |
-| D5 | 提交延迟 | 组提交，三档可配；**出厂默认 `sync`（RPO=0）**，`async` 必须显式声明（实现现状：`async` 尚未实现，服务端明确拒绝；可用的是 `sync` / `batch`，见兼容性清单 §4.5.3） |
+| D5 | 提交延迟 | 组提交，三档可配；**出厂默认 `sync`（RPO=0）**，`async` 必须显式声明（实现现状：`sync` / `batch` / `async` 三档均可用；`async` 的 RPO>0 边界见兼容性清单 §4.5.3） |
 | D6 | SST 布局 | **索引块与数据块分离成两个对象** |
 | D7 | 事务 | MVCC(快照隔离) + 单分片串行 + 跨分片 2PC |
 | D9 | B+ 树索引 | 以 LSM 实现，对外提供 B+ 树语义 |
@@ -97,5 +102,5 @@
 **当前状态：M0 已完成并通过验收，M1–M3 的核心部分也已落地**（LSM 引擎与崩溃恢复、
 MVCC 快照隔离、跨分片 2PC、四类索引与全文检索、分区裁剪、MySQL 协议、
 元数据服务 MS 等）。已实现与未实现的完整清单见
-[PROJECT_GUIDE.md](../../PROJECT_GUIDE.md) 的「版本状态」一节；使用侧的限制见
+[PROJECT_GUIDE.md](https://github.com/clouddea/yang-base/blob/main/PROJECT_GUIDE.md) 的「版本状态」一节；使用侧的限制见
 [compatibility.md](compatibility.md)。
