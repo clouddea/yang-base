@@ -14,7 +14,7 @@ pretending not to have any.
 
 Nothing yet. The next release window opens after `v0.1.0` is tagged.
 
-## [0.1.0] - 2026-10-30
+## [0.1.0] - 2026-11-06
 
 > **YangBase —— 完全构建在对象存储上的 MySQL 兼容 TP 数据库。**
 > CN 无状态、可随时销毁重建，对象存储是唯一真相源；没有写入就没有固定费用。
