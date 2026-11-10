@@ -47,6 +47,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail on a missing secret in seconds instead of minutes. Without this, an absent
+      # secret surfaced from inside the object-store SPI as `SignatureDoesNotMatch` or
+      # `invalid credentials` -- a message that points at the code, not the configuration.
+      - name: Preflight · OSS secrets present
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_REGION: ${{ secrets.OSS_REGION }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: ./scripts/check-oss-secrets.sh
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -133,6 +145,15 @@ jobs:
       YB_S3_SECRET_KEY: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Preflight · OSS secrets present
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_REGION: ${{ secrets.OSS_REGION }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: ./scripts/check-oss-secrets.sh
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
