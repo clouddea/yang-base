@@ -12,7 +12,13 @@ pretending not to have any.
 
 ## [Unreleased]
 
-Nothing yet. The next release window opens after `v0.1.0` is tagged.
+### Added
+
+- CI: `oss.yml` now runs `scripts/check-oss-secrets.sh` before touching Gradle, so a missing
+  OSS secret fails in seconds with the variable name and where to set it, instead of surfacing
+  later as `SignatureDoesNotMatch` from inside the object-store SPI (#25).
+- Docs: `docs/{en,zh}/ci.md` — what each workflow proves, why the real-backend job is nightly
+  and off `pull_request`, and the least-privilege RAM policy the CI sub-account needs.
 
 ## [0.1.0] - 2026-11-06
 
