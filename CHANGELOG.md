@@ -12,6 +12,11 @@ pretending not to have any.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
+CI hardening release. There are no engine changes and no on-disk format changes: a 0.1.0 data
+set plus its WAL is readable by 0.2.0 without migration.
+
 ### Added
 
 - CI: `oss.yml` now runs `scripts/check-oss-secrets.sh` before touching Gradle, so a missing
@@ -19,6 +24,14 @@ pretending not to have any.
   later as `SignatureDoesNotMatch` from inside the object-store SPI (#25).
 - Docs: `docs/{en,zh}/ci.md` — what each workflow proves, why the real-backend job is nightly
   and off `pull_request`, and the least-privilege RAM policy the CI sub-account needs.
+
+### Known issues
+
+- **#25 is only half closed.** The fail-fast preflight and the documentation are in; the
+  operational half is not. CI still authenticates with the main account's AK/SK, because creating
+  the restricted RAM sub-account needs console access the maintainer holds, not code. Until that
+  swap happens, a leaked CI secret is a leaked main account. The three steps are in
+  `docs/{en,zh}/ci.md`.
 
 ## [0.1.0] - 2026-11-06
 
